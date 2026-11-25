@@ -1,0 +1,38 @@
+{
+  "horas_ventana": 24,
+  "max_items_por_seccion": 5,
+  "github_releases": [
+    {"name": "Jellyfin", "repo": "jellyfin/jellyfin"},
+    {"name": "qBittorrent", "repo": "qbittorrent/qBittorrent"},
+    {"name": "Obsidian", "repo": "obsidianmd/obsidian-releases"},
+    {"name": "Playnite", "repo": "JosefNemec/Playnite"},
+    {"name": "Flow Launcher", "repo": "Flow-Launcher/Flow.Launcher"}
+  ],
+  "juegos": [
+    {"name": "Factorio", "type": "steam_news", "appid": 427520},
+    {"name": "Project Zomboid", "type": "steam_news", "appid": 108600},
+    {"name": "League of Legends", "type": "lol_patch"}
+  ],
+  "anime_y_series": [
+    {
+      "name": "Anime News Network",
+      "type": "rss",
+      "url": "https://www.animenewsnetwork.com/all/rss.xml?ann-edition=w"
+    },
+    {
+      "name": "LiveChart (Episodios)",
+      "type": "rss",
+      "url": "https://www.livechart.me/feeds/episodes"
+    },
+    {
+      "name": "MyAnimeList News",
+      "type": "rss",
+      "url": "https://myanimelist.net/rss/news.xml"
+    },
+    {
+      "name": "Espinof (Series y Cine)",
+      "type": "rss",
+      "url": "https://www.espinof.com/index.xml"
+    }
+  ]
+}

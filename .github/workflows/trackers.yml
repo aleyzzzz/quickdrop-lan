@@ -1,0 +1,65 @@
+name: Antigravity-Hub Trackers 24/7
+
+on:
+  schedule:
+    # Cazador de precios: cada 6 horas
+    - cron: '0 */6 * * *'
+    # Radar laboral y Boletín matutino: 09:00 ART (12:00 UTC)
+    - cron: '0 12 * * *'
+  workflow_dispatch:
+    inputs:
+      tracker:
+        description: 'Qué tracker ejecutar'
+        required: true
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - precios
+          - laboral
+          - boletin
+
+jobs:
+  run-trackers:
+    runs-on: ubuntu-latest
+    env:
+      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+
+    steps:
+      - name: Checkout repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Restaurar estado de deduplicación
+        uses: actions/cache@v4
+        with:
+          path: |
+            state/precios_vistos.json
+            state/vacantes_vistas.json
+            state/boletin_vistos.json
+          key: trackers-state-${{ github.run_id }}
+          restore-keys: |
+            trackers-state-
+
+      - name: Ejecutar Cazador de Precios
+        if: |
+          github.event_name == 'schedule' && github.event.schedule == '0 */6 * * *' ||
+          github.event_name == 'workflow_dispatch' && (inputs.tracker == 'all' || inputs.tracker == 'precios')
+        run: python scripts/trackers/cazador_precios.py
+
+      - name: Ejecutar Radar Laboral Diario
+        if: |
+          github.event_name == 'schedule' && github.event.schedule == '0 12 * * *' ||
+          github.event_name == 'workflow_dispatch' && (inputs.tracker == 'all' || inputs.tracker == 'laboral')
+        run: python scripts/trackers/radar_laboral.py
+
+      - name: Ejecutar Boletín Matutino
+        if: |
+          github.event_name == 'schedule' && github.event.schedule == '0 12 * * *' ||
+          github.event_name == 'workflow_dispatch' && (inputs.tracker == 'all' || inputs.tracker == 'boletin')
+        run: python scripts/trackers/boletin_diario.py

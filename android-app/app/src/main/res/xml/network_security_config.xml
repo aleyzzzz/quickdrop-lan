@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<network-security-config>
+    <!-- QuickDrop LAN operates exclusively over local Wi-Fi / LAN HTTP -->
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>

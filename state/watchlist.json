@@ -1,0 +1,33 @@
+{
+  "items": [
+    {
+      "id": "vuelo-eze-mad-promo",
+      "name": "Vuelo EZE - MAD ida y vuelta (ofertas)",
+      "type": "rss_flight",
+      "urls": [
+        "https://promociones-aereas.com.ar/feed/",
+        "https://www.infoviajera.com/feed/"
+      ],
+      "must_match_all": [
+        ["madrid", "mad"],
+        ["eze", "ezeiza", "buenos aires", "argentina"]
+      ],
+      "exclude_keywords": ["hotel", "crucero", "paquete sin aereo"],
+      "max_price": 950,
+      "currency": "USD",
+      "enabled": true
+    },
+    {
+      "id": "ssd-nvme-1tb-compragamer",
+      "name": "SSD NVMe 1TB (CompraGamer - el más barato en stock)",
+      "type": "compragamer_search",
+      "url": "https://static.compragamer.com/productos",
+      "keywords": ["ssd", "1tb"],
+      "any_keywords": ["nvme", "m.2", "m2"],
+      "exclude_keywords": ["externo", "portable", "caddy", "adaptador"],
+      "max_price": 300000,
+      "currency": "ARS",
+      "enabled": true
+    }
+  ]
+}

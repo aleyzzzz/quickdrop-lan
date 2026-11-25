@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">QuickDrop LAN</string>
+    <string name="share_action_label">Enviar a PC (QuickDrop)</string>
+</resources>
