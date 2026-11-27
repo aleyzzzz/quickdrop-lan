@@ -21,31 +21,42 @@ MAX_HISTORY_ITEMS = 500
 MDNS_SERVICE_TYPE = "_quickdrop._tcp.local."
 
 
+def is_frozen() -> bool:
+    """Return True when running as a PyInstaller frozen executable."""
+    return bool(getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"))
+
+
 def get_resource_dir() -> Path:
     """Return directory containing bundled assets (supports PyInstaller onefile)."""
-    meipass = getattr(sys, "_MEIPASS", None)
-    if meipass:
-        return Path(meipass)
+    if is_frozen():
+        return Path(getattr(sys, "_MEIPASS"))
     return Path(__file__).resolve().parent
 
 
 def get_default_data_dir() -> Path:
-    """Return writable directory for settings, history, and logs."""
+    """Return writable per-user directory for settings, history, and logs (%APPDATA%\\QuickDropLAN)."""
     env_dir = os.environ.get("QUICKDROP_DATA_DIR")
     if env_dir:
-        return Path(env_dir).expanduser().resolve()
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "QuickDropLAN"
-    return Path.home() / ".quickdrop-lan"
+        path = Path(env_dir).expanduser().resolve()
+    else:
+        app_data = os.environ.get("APPDATA") or os.environ.get("LOCALAPPDATA")
+        if app_data:
+            path = Path(app_data) / "QuickDropLAN"
+        else:
+            path = Path.home() / ".quickdrop-lan"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 def get_default_download_dir() -> Path:
     """Return default destination folder for received files (~/Downloads/QuickDrop)."""
     env_dir = os.environ.get("QUICKDROP_DOWNLOAD_DIR")
     if env_dir:
-        return Path(env_dir).expanduser().resolve()
-    return Path.home() / "Downloads" / "QuickDrop"
+        path = Path(env_dir).expanduser().resolve()
+    else:
+        path = Path.home() / "Downloads" / "QuickDrop"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
 
 
 @dataclass

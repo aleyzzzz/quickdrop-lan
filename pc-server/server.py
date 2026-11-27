@@ -673,7 +673,7 @@ def create_app(
             },
         )
 
-    # --- Minimalist Web UI ---
+    # --- Minimalist Web UI (supports PyInstaller sys._MEIPASS) ---
 
     web_dir = get_resource_dir() / "web"
     if web_dir.is_dir():
@@ -685,5 +685,7 @@ def create_app(
                 web_dir / "index.html",
                 headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
             )
+    else:
+        logger.error("Carpeta web/ no encontrada en %s", web_dir)
 
     return app

@@ -1,4 +1,4 @@
-"""QuickDrop LAN PC entrypoint with Windows system tray icon (pystray) and headless mode."""
+"""QuickDrop LAN PC entrypoint with Windows system tray icon, single-instance guard, and autostart toggle."""
 
 from __future__ import annotations
 
@@ -6,9 +6,12 @@ import argparse
 import gc
 import logging
 import os
+import shutil
+import socket
 import sys
 import threading
 import time
+import urllib.request
 import webbrowser
 from pathlib import Path
 
@@ -21,26 +24,38 @@ from config import (
     build_uvicorn_log_config,
     get_default_data_dir,
     get_primary_lan_ip,
+    get_resource_dir,
+    is_frozen,
     setup_logging,
 )
 from server import create_app
 
 logger = logging.getLogger("quickdrop.tray")
 
+_RUN_KEY_PATH = r"Software\Microsoft\Windows\CurrentVersion\Run"
+_RUN_VALUE_NAME = "QuickDropLAN"
+
 
 def _build_tray_icon_image():
-    """Generate a crisp, tiny 64x64 QuickDrop icon in memory with Pillow."""
+    """Load bundled PNG icon from resources (MEIPASS-aware) or draw a crisp 64x64 fallback."""
     from PIL import Image, ImageDraw
+
+    bundled_png = get_resource_dir() / "assets" / "quickdrop.png"
+    if bundled_png.is_file():
+        try:
+            with Image.open(bundled_png) as opened:
+                return opened.convert("RGBA").resize((64, 64), Image.Resampling.LANCZOS)
+        except Exception as exc:
+            logger.warning("No se pudo cargar icono empaquetado (%s), usando fallback: %s", bundled_png, exc)
 
     size = 64
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
 
-    # Rounded dark badge with electric cyan accent arrow/bolt
-    draw.rounded_rectangle((4, 4, 60, 60), radius=16, fill=(11, 15, 23, 255), outline=(56, 189, 248, 255), width=3)
-    # Up/down transfer chevrons
-    draw.polygon([(22, 27), (32, 14), (42, 27), (36, 27), (36, 36), (28, 36), (28, 27)], fill=(56, 189, 248, 255))
-    draw.polygon([(22, 39), (32, 51), (42, 39), (36, 39), (36, 33), (28, 33), (28, 39)], fill=(45, 212, 191, 255))
+    # Rounded obsidian badge with cyan/emerald transfer chevrons
+    draw.rounded_rectangle((4, 4, 60, 60), radius=16, fill=(9, 9, 11, 255), outline=(6, 182, 212, 255), width=3)
+    draw.polygon([(22, 27), (32, 14), (42, 27), (36, 27), (36, 36), (28, 36), (28, 27)], fill=(34, 211, 238, 255))
+    draw.polygon([(22, 39), (32, 51), (42, 39), (36, 39), (36, 33), (28, 33), (28, 39)], fill=(16, 185, 129, 255))
     return img
 
 
@@ -58,10 +73,17 @@ def _trim_process_memory() -> None:
 
 
 def _ensure_icon_file(data_dir: Path) -> Path | None:
-    """Save a small PNG icon once for Windows toast notifications."""
+    """Ensure a persistent PNG icon exists in %APPDATA%\\QuickDropLAN for Windows toast notifications."""
     icon_file = data_dir / "quickdrop_icon.png"
     if icon_file.exists():
         return icon_file
+    bundled_png = get_resource_dir() / "assets" / "quickdrop.png"
+    if bundled_png.is_file():
+        try:
+            shutil.copyfile(bundled_png, icon_file)
+            return icon_file
+        except OSError:
+            pass
     try:
         img = _build_tray_icon_image()
         img.save(icon_file, format="PNG")
@@ -70,6 +92,74 @@ def _ensure_icon_file(data_dir: Path) -> Path | None:
     except Exception as exc:
         logger.warning("No se pudo generar icono PNG: %s", exc)
         return None
+
+
+def _is_instance_already_running(port: int) -> bool:
+    """Check if QuickDrop LAN is already listening locally on the configured port."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=0.45) as resp:
+            return resp.status == 200
+    except Exception:
+        pass
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.settimeout(0.35)
+    try:
+        return sock.connect_ex(("127.0.0.1", port)) == 0
+    except OSError:
+        return False
+    finally:
+        sock.close()
+
+
+def _get_autostart_command() -> str:
+    """Return the command line registered in HKCU\\...\\Run for Windows startup."""
+    if is_frozen():
+        return f'"{Path(sys.executable).resolve()}"'
+    exe_path = Path(sys.executable).resolve()
+    pythonw = exe_path.with_name("pythonw.exe")
+    launcher = pythonw if pythonw.is_file() else exe_path
+    return f'"{launcher}" "{Path(__file__).resolve()}"'
+
+
+def _is_autostart_enabled() -> bool:
+    """Return True if QuickDropLAN is registered to start with Windows for current user."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH, 0, winreg.KEY_READ) as key:
+            val, _ = winreg.QueryValueEx(key, _RUN_VALUE_NAME)
+            return bool(str(val).strip())
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return False
+
+
+def _set_autostart_enabled(enable: bool) -> bool:
+    """Enable or disable automatic startup via HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run."""
+    if os.name != "nt":
+        return False
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, _RUN_KEY_PATH, 0, winreg.KEY_SET_VALUE) as key:
+            if enable:
+                cmd = _get_autostart_command()
+                winreg.SetValueEx(key, _RUN_VALUE_NAME, 0, winreg.REG_SZ, cmd)
+                logger.info("Inicio con Windows activado: %s", cmd)
+            else:
+                try:
+                    winreg.DeleteValue(key, _RUN_VALUE_NAME)
+                    logger.info("Inicio con Windows desactivado.")
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as exc:
+        logger.warning("No se pudo actualizar inicio con Windows: %s", exc)
+        return False
 
 
 def _run_tray(
@@ -81,7 +171,7 @@ def _run_tray(
     import pystray
 
     port = settings_manager.settings.port
-    local_url = f"http://localhost:{port}"
+    local_url = f"http://127.0.0.1:{port}"
 
     def open_web_ui(_icon=None, _item=None) -> None:
         webbrowser.open(local_url)
@@ -108,6 +198,9 @@ def _run_tray(
         current = settings_manager.settings.notifications_enabled
         settings_manager.update(notifications_enabled=not current)
 
+    def toggle_autostart(_icon, _item) -> None:
+        _set_autostart_enabled(not _is_autostart_enabled())
+
     def quit_app(icon, _item=None) -> None:
         logger.info("Cerrando QuickDrop LAN desde la bandeja...")
         uvicorn_server.should_exit = True
@@ -131,6 +224,11 @@ def _run_tray(
             "Notificaciones de Windows",
             toggle_notifications,
             checked=lambda _item: settings_manager.settings.notifications_enabled,
+        ),
+        pystray.MenuItem(
+            "Iniciar con Windows",
+            toggle_autostart,
+            checked=lambda _item: _is_autostart_enabled(),
         ),
         pystray.Menu.SEPARATOR,
         pystray.MenuItem("Salir", quit_app),
@@ -173,6 +271,15 @@ def main(argv: list[str] | None = None) -> int:
         "download_dir": str(Path(args.download_dir).expanduser().resolve()) if args.download_dir else None,
     }
     settings_manager = SettingsManager(data_dir=data_dir, overrides=overrides)
+    port = settings_manager.settings.port
+
+    # Smart single-instance guard: if already running, open web UI and exit cleanly
+    if not args.headless and _is_instance_already_running(port):
+        local_url = f"http://127.0.0.1:{port}"
+        logger.info("QuickDrop LAN ya está ejecutándose en el puerto %d; abriendo %s", port, local_url)
+        webbrowser.open(local_url)
+        return 0
+
     icon_file = None if args.no_notifications else _ensure_icon_file(data_dir)
 
     app = create_app(
@@ -185,7 +292,7 @@ def main(argv: list[str] | None = None) -> int:
     uvicorn_config = uvicorn.Config(
         app=app,
         host=settings_manager.settings.host,
-        port=settings_manager.settings.port,
+        port=port,
         log_config=build_uvicorn_log_config(log_file),
         access_log=False,
         timeout_keep_alive=30,
