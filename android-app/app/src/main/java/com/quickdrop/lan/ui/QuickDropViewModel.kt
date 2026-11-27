@@ -23,18 +23,32 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import okhttp3.sse.EventSource
 
+data class ShareSheetState(
+    val summary: String,
+    val detail: String? = null,
+    val targetName: String? = null,
+    val isWaitingForConnection: Boolean = false,
+    val isSending: Boolean = false,
+    val isCompleted: Boolean = false,
+    val errorMessage: String? = null,
+)
+
 data class QuickDropUiState(
     val connectionState: ConnectionState = ConnectionState.Searching,
     val discoveredServers: List<ServerEndpoint> = emptyList(),
     val manualHost: String = "",
     val manualPort: String = "8765",
     val useManualEndpoint: Boolean = false,
-    val selectedTab: Int = 0, // 0 = Enviar, 1 = Recibidos
+    val selectedTab: Int = 0, // 0 = Enviar, 1 = Historial
     val textInput: String = "",
+    val isSendingText: Boolean = false,
     val sentItems: List<TransferItem> = emptyList(),
     val receivedItems: List<TransferItem> = emptyList(),
     val activeTransfer: TransferProgress? = null,
+    val downloadingItemId: String? = null,
+    val downloadedItemIds: Set<String> = emptySet(),
     val pendingShare: PendingShare? = null,
+    val shareSheetState: ShareSheetState? = null,
     val snackbarMessage: String? = null,
     val unreadReceivedCount: Int = 0,
     val isRefreshing: Boolean = false,
@@ -60,6 +74,7 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
     private var sseSource: EventSource? = null
     private var sseReconnectJob: Job? = null
     private var connectJob: Job? = null
+    private var shareAutoCloseJob: Job? = null
 
     init {
         observeDiscoveredServers()
@@ -112,6 +127,11 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun consumeSnackbar() {
         _uiState.update { it.copy(snackbarMessage = null) }
+    }
+
+    fun dismissShareSheet() {
+        shareAutoCloseJob?.cancel()
+        _uiState.update { it.copy(shareSheetState = null, pendingShare = null) }
     }
 
     fun restartDiscovery() {
@@ -318,13 +338,14 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun sendCurrentText() {
         val text = _uiState.value.textInput.trim()
-        if (text.isEmpty()) return
+        if (text.isEmpty() || _uiState.value.isSendingText) return
         val conn = _uiState.value.connectionState as? ConnectionState.Connected
         if (conn == null) {
             showSnackbar("Conéctate primero a tu PC en la misma red Wi-Fi")
             return
         }
         viewModelScope.launch {
+            _uiState.update { it.copy(isSendingText = true) }
             runCatching {
                 client.sendText(conn.endpoint, text, sender = deviceDisplayName())
             }.onSuccess { item ->
@@ -332,11 +353,13 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
                 _uiState.update { state ->
                     state.copy(
                         textInput = "",
+                        isSendingText = false,
                         sentItems = listOf(item) + state.sentItems.filterNot { it.id == item.id },
-                        snackbarMessage = if (item.kind == "link") "Enlace enviado a la PC" else "Texto enviado a la PC",
+                        snackbarMessage = if (item.kind == "link") "Enlace enviado a ${conn.endpoint.name}" else "Texto enviado a ${conn.endpoint.name}",
                     )
                 }
             }.onFailure { err ->
+                _uiState.update { it.copy(isSendingText = false) }
                 showSnackbar(err.message ?: "Error al enviar texto")
             }
         }
@@ -350,36 +373,74 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
             showSnackbar("Esperando conexión con la PC para enviar ${uris.size} archivo(s)...")
             return
         }
-        uploadUrisSequential(conn.endpoint, uris)
+        viewModelScope.launch {
+            uploadUrisSequential(conn.endpoint, uris)
+        }
     }
 
     fun handleIncomingShare(text: String?, uris: List<Uri>) {
         val payload = PendingShare(text = text?.trim()?.takeIf { it.isNotEmpty() }, uris = uris)
         if (payload.isEmpty) return
 
+        shareAutoCloseJob?.cancel()
+        val summary = buildShareSummary(payload)
+        val detail = payload.text?.take(120)
         val conn = _uiState.value.connectionState as? ConnectionState.Connected
         if (conn == null) {
-            _uiState.update { it.copy(pendingShare = payload, selectedTab = 0) }
-            showSnackbar("Buscando tu PC para enviar lo compartido...")
+            _uiState.update {
+                it.copy(
+                    pendingShare = payload,
+                    selectedTab = 0,
+                    shareSheetState = ShareSheetState(
+                        summary = summary,
+                        detail = detail,
+                        isWaitingForConnection = true,
+                    ),
+                )
+            }
             return
         }
-        dispatchSharePayload(conn.endpoint, payload)
+        dispatchSharePayload(conn.endpoint, payload, fromShareSheet = true)
     }
 
     fun clearPendingShare() {
-        _uiState.update { it.copy(pendingShare = null) }
+        shareAutoCloseJob?.cancel()
+        _uiState.update { it.copy(pendingShare = null, shareSheetState = null) }
     }
 
     private fun flushPendingShareIfAny() {
         val pending = _uiState.value.pendingShare ?: return
         val conn = _uiState.value.connectionState as? ConnectionState.Connected ?: return
+        val hadShareSheet = _uiState.value.shareSheetState != null
         _uiState.update { it.copy(pendingShare = null) }
-        dispatchSharePayload(conn.endpoint, pending)
+        dispatchSharePayload(conn.endpoint, pending, fromShareSheet = hadShareSheet)
     }
 
-    private fun dispatchSharePayload(endpoint: ServerEndpoint, payload: PendingShare) {
+    private fun dispatchSharePayload(
+        endpoint: ServerEndpoint,
+        payload: PendingShare,
+        fromShareSheet: Boolean,
+    ) {
+        val summary = buildShareSummary(payload)
+        val detail = payload.text?.take(120)
+
+        if (fromShareSheet) {
+            _uiState.update {
+                it.copy(
+                    shareSheetState = ShareSheetState(
+                        summary = summary,
+                        detail = detail,
+                        targetName = endpoint.name,
+                        isSending = true,
+                    ),
+                )
+            }
+        }
+
         viewModelScope.launch {
             var sentCount = 0
+            var lastError: String? = null
+
             if (!payload.text.isNullOrBlank()) {
                 runCatching {
                     client.sendText(endpoint, payload.text, sender = deviceDisplayName())
@@ -390,58 +451,101 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
                         state.copy(sentItems = listOf(item) + state.sentItems.filterNot { it.id == item.id })
                     }
                 }.onFailure { err ->
-                    showSnackbar(err.message ?: "Error enviando enlace/texto compartido")
+                    val errMsg = err.message ?: "Error enviando enlace/texto compartido"
+                    lastError = errMsg
+                    if (!fromShareSheet) showSnackbar(errMsg)
                 }
             }
+
             if (payload.uris.isNotEmpty()) {
-                uploadUrisSequential(endpoint, payload.uris)
-            } else if (sentCount > 0) {
+                val (uploaded, errMsg) = uploadUrisSequential(endpoint, payload.uris, showToast = !fromShareSheet)
+                sentCount += uploaded
+                if (errMsg != null) lastError = errMsg
+            } else if (sentCount > 0 && !fromShareSheet) {
                 showSnackbar("Enviado a ${endpoint.name}")
+            }
+
+            if (fromShareSheet) {
+                if (sentCount > 0 && lastError == null) {
+                    _uiState.update {
+                        it.copy(
+                            shareSheetState = ShareSheetState(
+                                summary = summary,
+                                detail = detail,
+                                targetName = endpoint.name,
+                                isCompleted = true,
+                            ),
+                        )
+                    }
+                    shareAutoCloseJob?.cancel()
+                    shareAutoCloseJob = viewModelScope.launch {
+                        delay(1300)
+                        _uiState.update { it.copy(shareSheetState = null) }
+                    }
+                } else {
+                    _uiState.update {
+                        it.copy(
+                            shareSheetState = ShareSheetState(
+                                summary = summary,
+                                detail = detail,
+                                targetName = endpoint.name,
+                                errorMessage = lastError ?: "No se pudo completar el envío",
+                            ),
+                        )
+                    }
+                }
             }
         }
     }
 
-    private fun uploadUrisSequential(endpoint: ServerEndpoint, uris: List<Uri>) {
+    private suspend fun uploadUrisSequential(
+        endpoint: ServerEndpoint,
+        uris: List<Uri>,
+        showToast: Boolean = true,
+    ): Pair<Int, String?> {
         val resolver = getApplication<Application>().contentResolver
-        viewModelScope.launch {
-            var okCount = 0
-            for ((idx, uri) in uris.withIndex()) {
-                val prefix = if (uris.size > 1) "[${idx + 1}/${uris.size}] " else ""
-                runCatching {
-                    client.uploadUri(
-                        endpoint = endpoint,
-                        contentResolver = resolver,
-                        uri = uri,
-                        sender = deviceDisplayName(),
-                    ) { filename, done, total, speed ->
-                        _uiState.update { state ->
-                            state.copy(
-                                activeTransfer = TransferProgress(
-                                    label = "$prefix$filename",
-                                    bytesDone = done,
-                                    totalBytes = total,
-                                    isDownload = false,
-                                    speedBytesPerSec = speed,
-                                ),
-                            )
-                        }
-                    }
-                }.onSuccess { item ->
-                    knownItemIds.add(item.id)
-                    okCount++
+        var okCount = 0
+        var lastError: String? = null
+
+        for ((idx, uri) in uris.withIndex()) {
+            val prefix = if (uris.size > 1) "[${idx + 1}/${uris.size}] " else ""
+            runCatching {
+                client.uploadUri(
+                    endpoint = endpoint,
+                    contentResolver = resolver,
+                    uri = uri,
+                    sender = deviceDisplayName(),
+                ) { filename, done, total, speed ->
                     _uiState.update { state ->
-                        state.copy(sentItems = listOf(item) + state.sentItems.filterNot { it.id == item.id })
+                        state.copy(
+                            activeTransfer = TransferProgress(
+                                label = "$prefix$filename",
+                                bytesDone = done,
+                                totalBytes = total,
+                                isDownload = false,
+                                speedBytesPerSec = speed,
+                            ),
+                        )
                     }
-                }.onFailure { err ->
-                    showSnackbar(err.message ?: "Transferencia cancelada o fallida")
                 }
-            }
-            _uiState.update { it.copy(activeTransfer = null) }
-            if (okCount > 0) {
-                val msg = if (okCount == 1) "Archivo enviado a ${endpoint.name}" else "$okCount archivos enviados a ${endpoint.name}"
-                showSnackbar(msg)
+            }.onSuccess { item ->
+                knownItemIds.add(item.id)
+                okCount++
+                _uiState.update { state ->
+                    state.copy(sentItems = listOf(item) + state.sentItems.filterNot { it.id == item.id })
+                }
+            }.onFailure { err ->
+                val errMsg = err.message ?: "Transferencia cancelada o fallida"
+                lastError = errMsg
+                if (showToast) showSnackbar(errMsg)
             }
         }
+        _uiState.update { it.copy(activeTransfer = null) }
+        if (okCount > 0 && showToast) {
+            val msg = if (okCount == 1) "Archivo enviado a ${endpoint.name}" else "$okCount archivos enviados a ${endpoint.name}"
+            showSnackbar(msg)
+        }
+        return okCount to lastError
     }
 
     fun downloadItem(item: TransferItem, onDownloaded: (Uri, String) -> Unit) {
@@ -453,6 +557,7 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
             val filename = item.filename ?: "archivo"
             _uiState.update {
                 it.copy(
+                    downloadingItemId = item.id,
                     activeTransfer = TransferProgress(
                         label = filename,
                         bytesDone = 0L,
@@ -480,11 +585,17 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
                     }
                 }
             }.onSuccess { uri ->
-                _uiState.update { it.copy(activeTransfer = null) }
+                _uiState.update {
+                    it.copy(
+                        activeTransfer = null,
+                        downloadingItemId = null,
+                        downloadedItemIds = it.downloadedItemIds + item.id,
+                    )
+                }
                 showSnackbar("Guardado en Descargas/QuickDrop")
                 onDownloaded(uri, item.mimeType)
             }.onFailure { err ->
-                _uiState.update { it.copy(activeTransfer = null) }
+                _uiState.update { it.copy(activeTransfer = null, downloadingItemId = null) }
                 showSnackbar(err.message ?: "Error al descargar archivo")
             }
         }
@@ -492,12 +603,33 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
 
     fun cancelActiveTransfer() {
         client.cancelActiveTransfer()
-        _uiState.update { it.copy(activeTransfer = null, snackbarMessage = "Transferencia cancelada") }
+        _uiState.update {
+            it.copy(
+                activeTransfer = null,
+                downloadingItemId = null,
+                snackbarMessage = "Transferencia cancelada",
+            )
+        }
     }
 
     fun showSnackbar(message: String) {
         _uiState.update { it.copy(snackbarMessage = message) }
     }
+
+    private fun buildShareSummary(payload: PendingShare): String = buildString {
+        val text = payload.text
+        if (!text.isNullOrBlank()) {
+            val isLink = text.startsWith("http://", ignoreCase = true) ||
+                text.startsWith("https://", ignoreCase = true)
+            append(if (isLink) "Enlace" else "Texto")
+        }
+        if (payload.uris.isNotEmpty()) {
+            if (isNotEmpty()) append(" + ")
+            append(
+                if (payload.uris.size == 1) "1 archivo" else "${payload.uris.size} archivos",
+            )
+        }
+    }.ifBlank { "Contenido compartido" }
 
     private fun deviceDisplayName(): String =
         listOfNotNull(Build.MANUFACTURER, Build.MODEL)
@@ -507,6 +639,7 @@ class QuickDropViewModel(application: Application) : AndroidViewModel(applicatio
 
     override fun onCleared() {
         super.onCleared()
+        shareAutoCloseJob?.cancel()
         disconnectSse()
         client.cancelActiveTransfer()
         nsd.stop()

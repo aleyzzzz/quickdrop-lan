@@ -12,7 +12,7 @@ import webbrowser
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncIterator
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -133,10 +133,11 @@ def create_app(
     )
 
     mdns_advertiser: MdnsAdvertiser | None = None
+    mdns_task: asyncio.Task[bool] | None = None
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        nonlocal mdns_advertiser
+        nonlocal mdns_advertiser, mdns_task
         # Ensure directories exist on startup
         settings_manager.settings.resolved_download_dir()
         settings_manager.settings.resolved_outbox_dir()
@@ -145,7 +146,8 @@ def create_app(
                 device_name=settings_manager.settings.resolved_device_name(),
                 port=settings_manager.settings.port,
             )
-            mdns_advertiser.start()
+            # Register mDNS in background thread so HTTP/Web UI is ready immediately
+            mdns_task = asyncio.create_task(asyncio.to_thread(mdns_advertiser.start))
         logger.info(
             "%s v%s iniciado en http://%s:%d (descargas: %s)",
             APP_NAME,
@@ -167,8 +169,10 @@ def create_app(
         try:
             yield
         finally:
+            if mdns_task is not None and not mdns_task.done():
+                mdns_task.cancel()
             if mdns_advertiser is not None:
-                mdns_advertiser.stop()
+                await asyncio.to_thread(mdns_advertiser.stop)
                 mdns_advertiser = None
             logger.info("%s detenido correctamente.", APP_NAME)
 
@@ -187,6 +191,14 @@ def create_app(
         allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def no_cache_web_assets(request: Request, call_next):
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+        return response
 
     # Expose internals for tray/tests
     app.state.settings_manager = settings_manager
@@ -334,7 +346,16 @@ def create_app(
 
         raw_filename = request.headers.get("x-filename") or request.query_params.get("filename")
         mime_type = request.headers.get("x-mime-type") or request.headers.get("content-type")
-        sender = request.headers.get("x-sender") or ("PC" if direction == "to_phone" else "Android")
+        raw_sender = request.headers.get("x-sender")
+        sender = (
+            unquote(raw_sender).strip()
+            if raw_sender
+            else (
+                settings_manager.settings.resolved_device_name()
+                if direction == "to_phone"
+                else "Android"
+            )
+        )
 
         dest_dir = (
             settings_manager.settings.resolved_outbox_dir()
@@ -457,6 +478,7 @@ def create_app(
     # --- History & File Streaming Download ---
 
     @app.get("/api/items")
+    @app.get("/api/history")
     async def list_items(
         direction: str | None = Query(default=None),
         limit: int = Query(default=100, ge=1, le=500),
@@ -623,15 +645,21 @@ def create_app(
 
         async def _generator() -> AsyncIterator[str]:
             try:
-                yield f"event: connected\ndata: {json.dumps({'ts': iso_now()})}\n\n"
+                # Immediate handshake frame so browser EventSource fires onopen right away
+                yield "retry: 3000\n\n"
+                yield f"event: connected\ndata: {json.dumps({'status': 'ok', 'ts': iso_now()})}\n\n"
                 while True:
                     if await request.is_disconnected():
                         break
                     try:
-                        evt = await asyncio.wait_for(queue.get(), timeout=20.0)
+                        evt = await asyncio.wait_for(queue.get(), timeout=15.0)
                         yield f"event: {evt['event']}\ndata: {json.dumps(evt['data'], ensure_ascii=False)}\n\n"
                     except asyncio.TimeoutError:
+                        if await request.is_disconnected():
+                            break
                         yield ": ping\n\n"
+            except asyncio.CancelledError:
+                pass
             finally:
                 hub.unsubscribe(queue)
 
@@ -639,7 +667,7 @@ def create_app(
             _generator(),
             media_type="text/event-stream",
             headers={
-                "Cache-Control": "no-cache",
+                "Cache-Control": "no-cache, no-transform",
                 "Connection": "keep-alive",
                 "X-Accel-Buffering": "no",
             },
@@ -653,6 +681,9 @@ def create_app(
 
         @app.get("/")
         async def index() -> FileResponse:
-            return FileResponse(web_dir / "index.html")
+            return FileResponse(
+                web_dir / "index.html",
+                headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+            )
 
     return app

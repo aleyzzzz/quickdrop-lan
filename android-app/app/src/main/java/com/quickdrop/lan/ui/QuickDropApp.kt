@@ -6,9 +6,21 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.expandVertically
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkVertically
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -23,37 +35,31 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.AttachFile
-import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.Close
-import androidx.compose.material.icons.rounded.Computer
-import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ContentPaste
-import androidx.compose.material.icons.rounded.Description
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.Image
-import androidx.compose.material.icons.rounded.Inbox
+import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.KeyboardArrowDown
 import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.PhotoLibrary
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Settings
-import androidx.compose.material.icons.rounded.Upload
-import androidx.compose.material3.AlertDialog
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.SwapVert
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -61,11 +67,15 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Snackbar
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -78,26 +88,34 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.quickdrop.lan.data.ConnectionState
-import com.quickdrop.lan.data.ServerEndpoint
 import com.quickdrop.lan.data.TransferItem
 import com.quickdrop.lan.data.TransferProgress
 import com.quickdrop.lan.data.formatBytes
-import com.quickdrop.lan.ui.theme.AccentMint
-import com.quickdrop.lan.ui.theme.AccentSky
+import com.quickdrop.lan.ui.theme.AccentCyan
+import com.quickdrop.lan.ui.theme.AccentCyanLight
+import com.quickdrop.lan.ui.theme.AccentEmerald
+import com.quickdrop.lan.ui.theme.BgBase
+import com.quickdrop.lan.ui.theme.BorderSubtle
+import com.quickdrop.lan.ui.theme.MonoTextStyle
 import com.quickdrop.lan.ui.theme.StatusAmber
 import com.quickdrop.lan.ui.theme.StatusError
 import com.quickdrop.lan.ui.theme.SurfaceCard
 import com.quickdrop.lan.ui.theme.SurfaceElevated
-import com.quickdrop.lan.ui.theme.TextMuted
+import com.quickdrop.lan.ui.theme.SurfaceNav
+import com.quickdrop.lan.ui.theme.TextPrimary
+import com.quickdrop.lan.ui.theme.TextSecondary
+import com.quickdrop.lan.ui.theme.TextTertiary
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -105,15 +123,23 @@ fun QuickDropApp(viewModel: QuickDropViewModel) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
-    var showConnectionDialog by remember { mutableStateOf(false) }
 
-    val anyFilesPicker = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenMultipleDocuments(),
+    var showConnectionSheet by remember { mutableStateOf(false) }
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedFilter by remember { mutableStateOf(HistoryFilter.ALL) }
+    var previewImageTarget by remember { mutableStateOf<Pair<TransferItem, String>?>(null) }
+
+    val baseUrl = (state.connectionState as? ConnectionState.Connected)?.endpoint?.baseUrl
+
+    // Native Photo Picker (Photos, Videos, GIFs)
+    val visualMediaPicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.PickMultipleVisualMedia(),
     ) { uris ->
         if (uris.isNotEmpty()) viewModel.sendFiles(uris)
     }
 
-    val mediaPicker = rememberLauncherForActivityResult(
+    // Any file picker (Audio, PDF, ZIP, APK, Documents)
+    val anyFilesPicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenMultipleDocuments(),
     ) { uris ->
         if (uris.isNotEmpty()) viewModel.sendFiles(uris)
@@ -125,394 +151,638 @@ fun QuickDropApp(viewModel: QuickDropViewModel) {
         viewModel.consumeSnackbar()
     }
 
-    Scaffold(
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        topBar = {
-            TopAppBar(
-                colors = TopAppBarDefaults.topAppBarColors(
-                    containerColor = MaterialTheme.colorScheme.background,
-                    titleContentColor = MaterialTheme.colorScheme.onBackground,
-                ),
-                title = {
-                    Column {
-                        Text(
-                            text = "QuickDrop LAN",
-                            style = MaterialTheme.typography.titleMedium,
-                            fontWeight = FontWeight.Bold,
-                        )
-                        ConnectionStatusSubtitle(
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(BgBase),
+    ) {
+        Scaffold(
+            containerColor = BgBase,
+            snackbarHost = {
+                SnackbarHost(hostState = snackbarHostState) { data ->
+                    Snackbar(
+                        snackbarData = data,
+                        containerColor = SurfaceElevated,
+                        contentColor = TextPrimary,
+                        shape = RoundedCornerShape(12.dp),
+                    )
+                }
+            },
+            topBar = {
+                TopAppBar(
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = BgBase,
+                        titleContentColor = TextPrimary,
+                    ),
+                    title = {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Box(
+                                contentAlignment = Alignment.Center,
+                                modifier = Modifier
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(8.dp))
+                                    .background(AccentCyan.copy(alpha = 0.14f)),
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Rounded.SwapVert,
+                                    contentDescription = null,
+                                    tint = AccentCyanLight,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                            }
+                            Text(
+                                text = "QuickDrop",
+                                style = MaterialTheme.typography.titleMedium,
+                                color = TextPrimary,
+                            )
+                        }
+                    },
+                    actions = {
+                        ConnectionStatusPill(
                             connectionState = state.connectionState,
-                            onClick = { showConnectionDialog = true },
+                            onClick = { showConnectionSheet = true },
+                            modifier = Modifier.padding(end = 12.dp),
                         )
-                    }
-                },
-                actions = {
-                    IconButton(onClick = { viewModel.restartDiscovery() }) {
-                        Icon(
-                            imageVector = Icons.Rounded.Refresh,
-                            contentDescription = "Buscar PC en la red",
-                        )
-                    }
-                    IconButton(onClick = { showConnectionDialog = true }) {
-                        Icon(
-                            imageVector = Icons.Rounded.Settings,
-                            contentDescription = "Configurar IP manual",
-                        )
-                    }
-                },
-            )
-        },
-        bottomBar = {
-            NavigationBar(containerColor = SurfaceCard) {
-                NavigationBarItem(
-                    selected = state.selectedTab == 0,
-                    onClick = { viewModel.selectTab(0) },
-                    icon = { Icon(Icons.Rounded.Upload, contentDescription = "Enviar") },
-                    label = { Text("Enviar") },
+                    },
                 )
-                NavigationBarItem(
-                    selected = state.selectedTab == 1,
-                    onClick = { viewModel.selectTab(1) },
-                    icon = {
-                        BadgedBox(
-                            badge = {
-                                if (state.unreadReceivedCount > 0) {
-                                    Badge { Text(state.unreadReceivedCount.toString()) }
+            },
+            bottomBar = {
+                Column {
+                    HorizontalDivider(thickness = 1.dp, color = BorderSubtle)
+                    NavigationBar(
+                        containerColor = SurfaceNav,
+                        tonalElevation = 0.dp,
+                    ) {
+                        val navColors = NavigationBarItemDefaults.colors(
+                            selectedIconColor = AccentCyanLight,
+                            selectedTextColor = TextPrimary,
+                            indicatorColor = AccentCyan.copy(alpha = 0.14f),
+                            unselectedIconColor = TextTertiary,
+                            unselectedTextColor = TextTertiary,
+                        )
+                        NavigationBarItem(
+                            selected = state.selectedTab == 0,
+                            onClick = { viewModel.selectTab(0) },
+                            icon = { Icon(Icons.Rounded.ArrowUpward, contentDescription = "Enviar") },
+                            label = { Text("Enviar", style = MaterialTheme.typography.labelMedium) },
+                            colors = navColors,
+                        )
+                        NavigationBarItem(
+                            selected = state.selectedTab == 1,
+                            onClick = { viewModel.selectTab(1) },
+                            icon = {
+                                BadgedBox(
+                                    badge = {
+                                        if (state.unreadReceivedCount > 0) {
+                                            Badge(
+                                                containerColor = AccentEmerald,
+                                                contentColor = Color(0xFF041A12),
+                                            ) {
+                                                Text(state.unreadReceivedCount.toString())
+                                            }
+                                        }
+                                    },
+                                ) {
+                                    Icon(Icons.Rounded.History, contentDescription = "Historial")
                                 }
                             },
-                        ) {
-                            Icon(Icons.Rounded.Inbox, contentDescription = "Recibidos")
-                        }
-                    },
-                    label = { Text("Recibidos") },
-                )
-            }
-        },
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-                .padding(horizontal = 16.dp),
-        ) {
-            state.activeTransfer?.let { progress ->
-                TransferProgressCard(
-                    progress = progress,
-                    onCancel = { viewModel.cancelActiveTransfer() },
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            state.pendingShare?.let { pending ->
-                PendingShareBanner(
-                    countDesc = buildString {
-                        if (!pending.text.isNullOrBlank()) append("Texto/link")
-                        if (pending.uris.isNotEmpty()) {
-                            if (isNotEmpty()) append(" + ")
-                            append("${pending.uris.size} archivo(s)")
-                        }
-                    },
-                    onConfigureIp = { showConnectionDialog = true },
-                    onDismiss = { viewModel.clearPendingShare() },
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-            }
-
-            if (state.selectedTab == 0) {
-                SendTabContent(
-                    state = state,
-                    onTextChange = viewModel::updateTextInput,
-                    onPasteClick = {
-                        val pasted = readClipboardText(context)
-                        if (!pasted.isNullOrBlank()) {
-                            viewModel.updateTextInput(pasted)
-                        } else {
-                            viewModel.showSnackbar("El portapapeles está vacío")
-                        }
-                    },
-                    onSendText = viewModel::sendCurrentText,
-                    onPickAnyFiles = { anyFilesPicker.launch(arrayOf("*/*")) },
-                    onPickMedia = {
-                        mediaPicker.launch(arrayOf("image/*", "video/*", "audio/*"))
-                    },
-                    onCopyText = { copyToClipboard(context, it); viewModel.showSnackbar("Copiado") },
-                    onOpenLink = { openExternalUrl(context, it) },
-                )
-            } else {
-                ReceivedTabContent(
-                    items = state.receivedItems,
-                    onRefresh = viewModel::refreshItems,
-                    onCopyText = { copyToClipboard(context, it); viewModel.showSnackbar("Copiado") },
-                    onOpenLink = { openExternalUrl(context, it) },
-                    onDownloadFile = { item ->
-                        viewModel.downloadItem(item) { uri, mime ->
-                            openDownloadedFile(context, uri, mime)
-                        }
-                    },
-                )
+                            label = { Text("Historial", style = MaterialTheme.typography.labelMedium) },
+                            colors = navColors,
+                        )
+                    }
+                }
+            },
+        ) { innerPadding ->
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(innerPadding)
+                    .padding(horizontal = 16.dp),
+            ) {
+                if (state.selectedTab == 0) {
+                    SendScreen(
+                        state = state,
+                        baseUrl = baseUrl,
+                        onTextChange = viewModel::updateTextInput,
+                        onPasteClick = {
+                            val pasted = readClipboardText(context)
+                            if (!pasted.isNullOrBlank()) {
+                                viewModel.updateTextInput(pasted)
+                            } else {
+                                viewModel.showSnackbar("El portapapeles está vacío")
+                            }
+                        },
+                        onSendText = viewModel::sendCurrentText,
+                        onPickGallery = {
+                            visualMediaPicker.launch(
+                                PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo),
+                            )
+                        },
+                        onPickAnyFiles = { anyFilesPicker.launch(arrayOf("*/*")) },
+                        onCancelTransfer = viewModel::cancelActiveTransfer,
+                        onOpenHistory = { viewModel.selectTab(1) },
+                        onCopyText = {
+                            copyToClipboard(context, it)
+                            viewModel.showSnackbar("Copiado")
+                        },
+                        onOpenLink = { openExternalUrl(context, it) },
+                        onDownloadFile = { item ->
+                            viewModel.downloadItem(item) { uri, mime ->
+                                openDownloadedFile(context, uri, mime)
+                            }
+                        },
+                        onPreviewImage = { item, url -> previewImageTarget = item to url },
+                    )
+                } else {
+                    HistoryScreen(
+                        allItems = remember(state.receivedItems, state.sentItems) {
+                            (state.receivedItems + state.sentItems)
+                                .distinctBy { it.id }
+                                .sortedByDescending { parseItemEpochMillis(it.createdAt) }
+                        },
+                        baseUrl = baseUrl,
+                        searchQuery = searchQuery,
+                        selectedFilter = selectedFilter,
+                        downloadingItemId = state.downloadingItemId,
+                        downloadedItemIds = state.downloadedItemIds,
+                        activeTransfer = state.activeTransfer,
+                        onSearchChange = { searchQuery = it },
+                        onFilterChange = { selectedFilter = it },
+                        onRefresh = viewModel::refreshItems,
+                        onCancelTransfer = viewModel::cancelActiveTransfer,
+                        onCopyText = {
+                            copyToClipboard(context, it)
+                            viewModel.showSnackbar("Copiado")
+                        },
+                        onOpenLink = { openExternalUrl(context, it) },
+                        onDownloadFile = { item ->
+                            viewModel.downloadItem(item) { uri, mime ->
+                                openDownloadedFile(context, uri, mime)
+                            }
+                        },
+                        onPreviewImage = { item, url -> previewImageTarget = item to url },
+                    )
+                }
             }
         }
+
+        // Centered elegant dark overlay for incoming Android Share Sheet intents
+        ShareSheetOverlay(
+            shareState = state.shareSheetState,
+            activeTransfer = state.activeTransfer,
+            onConfigureIp = { showConnectionSheet = true },
+            onDismiss = viewModel::dismissShareSheet,
+        )
     }
 
-    if (showConnectionDialog) {
-        ConnectionDialog(
+    if (showConnectionSheet) {
+        ConnectionBottomSheet(
+            connectionState = state.connectionState,
             discovered = state.discoveredServers,
             initialHost = state.manualHost,
             initialPort = state.manualPort,
             useManual = state.useManualEndpoint,
-            onDismiss = { showConnectionDialog = false },
+            onDismiss = { showConnectionSheet = false },
+            onRescanMdns = viewModel::restartDiscovery,
             onSelectDiscovered = { endpoint ->
                 viewModel.selectDiscoveredServer(endpoint)
-                showConnectionDialog = false
+                showConnectionSheet = false
             },
             onConnectManual = { host, port ->
                 viewModel.applyManualConnection(host, port)
-                showConnectionDialog = false
+                showConnectionSheet = false
             },
             onEnableAuto = {
                 viewModel.switchToAutoDiscovery()
-                showConnectionDialog = false
+                showConnectionSheet = false
+            },
+        )
+    }
+
+    previewImageTarget?.let { (item, url) ->
+        ImageViewerDialog(
+            item = item,
+            imageUrl = url,
+            isDownloading = state.downloadingItemId == item.id,
+            isDownloaded = item.id in state.downloadedItemIds,
+            onDismiss = { previewImageTarget = null },
+            onDownload = {
+                viewModel.downloadItem(item) { uri, mime ->
+                    openDownloadedFile(context, uri, mime)
+                }
             },
         )
     }
 }
 
 @Composable
-private fun ConnectionStatusSubtitle(
+private fun ConnectionStatusPill(
     connectionState: ConnectionState,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
-    val (dotColor, label) = when (connectionState) {
-        is ConnectionState.Connected -> AccentMint to "${connectionState.info.hostname} · ${connectionState.endpoint.host}:${connectionState.endpoint.port}"
-        is ConnectionState.Searching -> StatusAmber to "Buscando PC por mDNS… (toca para IP manual)"
-        is ConnectionState.Disconnected -> StatusError to "${connectionState.message} (toca para configurar)"
+    val infiniteTransition = rememberInfiniteTransition(label = "statusPulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 1f,
+        targetValue = 0.35f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(durationMillis = 1000),
+            repeatMode = RepeatMode.Reverse,
+        ),
+        label = "dotAlpha",
+    )
+
+    val (dotColor, shouldPulse, label) = when (connectionState) {
+        is ConnectionState.Connected -> Triple(
+            AccentEmerald,
+            true,
+            connectionState.info.hostname.ifBlank { connectionState.endpoint.name },
+        )
+        is ConnectionState.Searching -> Triple(StatusAmber, true, "Buscando…")
+        is ConnectionState.Disconnected -> Triple(StatusError, false, "Sin conexión")
     }
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.clickable(onClick = onClick),
+    Surface(
+        color = SurfaceCard,
+        shape = RoundedCornerShape(999.dp),
+        border = BorderStroke(1.dp, BorderSubtle),
+        modifier = modifier
+            .clip(RoundedCornerShape(999.dp))
+            .clickable(onClick = onClick),
     ) {
-        Box(
-            modifier = Modifier
-                .size(8.dp)
-                .clip(CircleShape)
-                .background(dotColor),
-        )
-        Spacer(modifier = Modifier.width(6.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.bodySmall,
-            color = TextMuted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier.padding(start = 10.dp, end = 8.dp, top = 6.dp, bottom = 6.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .alpha(if (shouldPulse) pulseAlpha else 1f)
+                    .clip(CircleShape)
+                    .background(dotColor),
+            )
+            Spacer(modifier = Modifier.width(7.dp))
+            Text(
+                text = label,
+                style = MaterialTheme.typography.labelMedium,
+                color = TextPrimary,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Spacer(modifier = Modifier.width(2.dp))
+            Icon(
+                imageVector = Icons.Rounded.KeyboardArrowDown,
+                contentDescription = "Configurar conexión",
+                tint = TextTertiary,
+                modifier = Modifier.size(16.dp),
+            )
+        }
     }
 }
 
 @Composable
-private fun TransferProgressCard(
+private fun ActiveTransferCard(
     progress: TransferProgress,
     onCancel: () -> Unit,
 ) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SurfaceElevated),
-        shape = RoundedCornerShape(14.dp),
+    val rawFraction = progress.fraction
+    val animatedProgress by animateFloatAsState(
+        targetValue = if (rawFraction >= 0f) rawFraction else 0f,
+        label = "transferProgress",
+    )
+    val percent = if (rawFraction >= 0f) "${(rawFraction * 100f).toInt().coerceIn(0, 100)}%" else "…"
+    val speedStr = if (progress.speedBytesPerSec > 0L) "${formatBytes(progress.speedBytesPerSec)}/s" else ""
+
+    Surface(
+        color = SurfaceElevated,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, AccentCyan.copy(alpha = 0.35f)),
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Column(modifier = Modifier.padding(14.dp)) {
+        Column(
+            modifier = Modifier.padding(14.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth(),
             ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = if (progress.isDownload) "DESCARGANDO" else "ENVIANDO",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = AccentCyanLight,
+                    )
+                    Text(
+                        text = progress.label,
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextPrimary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 Text(
-                    text = if (progress.isDownload) "Descargando: ${progress.label}" else "Enviando: ${progress.label}",
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
+                    text = percent,
+                    style = MonoTextStyle.copy(fontSize = 14.sp, fontWeight = FontWeight.Bold),
+                    color = AccentCyanLight,
                 )
-                IconButton(onClick = onCancel, modifier = Modifier.size(28.dp)) {
-                    Icon(Icons.Rounded.Close, contentDescription = "Cancelar", tint = TextMuted)
+                IconButton(
+                    onClick = onCancel,
+                    modifier = Modifier.size(30.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.Close,
+                        contentDescription = "Cancelar",
+                        tint = TextTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
                 }
             }
-            Spacer(modifier = Modifier.height(6.dp))
-            if (progress.fraction >= 0f) {
+
+            if (rawFraction >= 0f) {
                 LinearProgressIndicator(
-                    progress = { progress.fraction },
+                    progress = { animatedProgress },
+                    color = AccentCyan,
+                    trackColor = BgBase,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
                         .clip(RoundedCornerShape(999.dp)),
-                    color = AccentSky,
                 )
             } else {
                 LinearProgressIndicator(
+                    color = AccentCyan,
+                    trackColor = BgBase,
                     modifier = Modifier
                         .fillMaxWidth()
                         .height(6.dp)
                         .clip(RoundedCornerShape(999.dp)),
-                    color = AccentSky,
                 )
             }
-            Spacer(modifier = Modifier.height(6.dp))
-            val speedText = if (progress.speedBytesPerSec > 0L) {
-                " · ${formatBytes(progress.speedBytesPerSec)}/s"
-            } else {
-                ""
+
+            Row(
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                val bytesLabel = if (progress.totalBytes > 0L) {
+                    "${formatBytes(progress.bytesDone)} / ${formatBytes(progress.totalBytes)}"
+                } else {
+                    formatBytes(progress.bytesDone)
+                }
+                Text(
+                    text = bytesLabel,
+                    style = MonoTextStyle.copy(fontSize = 11.sp),
+                    color = TextSecondary,
+                )
+                if (speedStr.isNotBlank()) {
+                    Text(
+                        text = speedStr,
+                        style = MonoTextStyle.copy(fontSize = 11.sp),
+                        color = AccentEmerald,
+                    )
+                }
             }
-            val totalText = if (progress.totalBytes > 0L) {
-                "${formatBytes(progress.bytesDone)} / ${formatBytes(progress.totalBytes)}"
-            } else {
-                formatBytes(progress.bytesDone)
-            }
-            Text(
-                text = "$totalText$speedText",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextMuted,
-            )
         }
     }
 }
 
 @Composable
-private fun PendingShareBanner(
-    countDesc: String,
-    onConfigureIp: () -> Unit,
-    onDismiss: () -> Unit,
-) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-        shape = RoundedCornerShape(12.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .border(1.dp, AccentSky.copy(alpha = 0.4f), RoundedCornerShape(12.dp)),
-    ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(12.dp),
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text("En cola para enviar: $countDesc", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.bodyMedium)
-                Text("Se enviará en cuanto conecte con la PC.", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-            }
-            TextButton(onClick = onConfigureIp) { Text("IP manual") }
-            IconButton(onClick = onDismiss) { Icon(Icons.Rounded.Close, contentDescription = "Descartar") }
-        }
-    }
-}
-
-@Composable
-private fun SendTabContent(
+private fun SendScreen(
     state: QuickDropUiState,
+    baseUrl: String?,
     onTextChange: (String) -> Unit,
     onPasteClick: () -> Unit,
     onSendText: () -> Unit,
+    onPickGallery: () -> Unit,
     onPickAnyFiles: () -> Unit,
-    onPickMedia: () -> Unit,
+    onCancelTransfer: () -> Unit,
+    onOpenHistory: () -> Unit,
     onCopyText: (String) -> Unit,
     onOpenLink: (String) -> Unit,
+    onDownloadFile: (TransferItem) -> Unit,
+    onPreviewImage: (TransferItem, String) -> Unit,
 ) {
     val isConnected = state.connectionState is ConnectionState.Connected
+    val looksLikeUrl = remember(state.textInput) {
+        val trimmed = state.textInput.trim()
+        trimmed.startsWith("http://", ignoreCase = true) || trimmed.startsWith("https://", ignoreCase = true)
+    }
+    val recentSent = remember(state.sentItems) { state.sentItems.take(3) }
 
     LazyColumn(
-        contentPadding = PaddingValues(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(12.dp),
+        contentPadding = PaddingValues(top = 8.dp, bottom = 24.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp),
         modifier = Modifier.fillMaxSize(),
     ) {
         item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = SurfaceCard),
-                shape = RoundedCornerShape(16.dp),
+            AnimatedVisibility(
+                visible = state.activeTransfer != null && state.shareSheetState == null,
+                enter = fadeIn() + expandVertically(),
+                exit = fadeOut() + shrinkVertically(),
+            ) {
+                state.activeTransfer?.let { progress ->
+                    ActiveTransferCard(progress = progress, onCancel = onCancelTransfer)
+                }
+            }
+        }
+
+        // Quick Text / Link Card
+        item {
+            Surface(
+                color = SurfaceCard,
+                shape = RoundedCornerShape(18.dp),
+                border = BorderStroke(1.dp, BorderSubtle),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Column(modifier = Modifier.padding(14.dp)) {
-                    Text(
-                        text = "Link o texto rápido",
-                        style = MaterialTheme.typography.titleSmall,
-                        fontWeight = FontWeight.SemiBold,
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            text = "Texto o enlace",
+                            style = MaterialTheme.typography.titleSmall,
+                            color = TextPrimary,
+                        )
+                        AnimatedVisibility(visible = looksLikeUrl) {
+                            Surface(
+                                color = AccentCyan.copy(alpha = 0.14f),
+                                shape = RoundedCornerShape(999.dp),
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Rounded.Link,
+                                        contentDescription = null,
+                                        tint = AccentCyanLight,
+                                        modifier = Modifier.size(13.dp),
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = "Enlace",
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = AccentCyanLight,
+                                    )
+                                }
+                            }
+                        }
+                    }
+
                     OutlinedTextField(
                         value = state.textInput,
                         onValueChange = onTextChange,
-                        placeholder = { Text("Pega un enlace (https://...) o escribe texto") },
-                        minLines = 2,
+                        placeholder = {
+                            Text(
+                                text = "Pega un enlace o escribe algo para tu PC…",
+                                color = TextTertiary,
+                            )
+                        },
+                        minLines = 3,
                         maxLines = 5,
+                        shape = RoundedCornerShape(12.dp),
+                        colors = OutlinedTextFieldDefaults.colors(
+                            focusedBorderColor = AccentCyan,
+                            unfocusedBorderColor = BorderSubtle,
+                            focusedContainerColor = SurfaceElevated,
+                            unfocusedContainerColor = SurfaceElevated,
+                            cursorColor = AccentCyan,
+                            focusedTextColor = TextPrimary,
+                            unfocusedTextColor = TextPrimary,
+                        ),
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    Spacer(modifier = Modifier.height(10.dp))
+
                     Row(
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         OutlinedButton(
                             onClick = onPasteClick,
-                            modifier = Modifier.weight(1f),
+                            shape = RoundedCornerShape(12.dp),
+                            border = BorderStroke(1.dp, BorderSubtle),
+                            modifier = Modifier
+                                .weight(0.95f)
+                                .height(44.dp),
                         ) {
-                            Icon(Icons.Rounded.ContentPaste, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Icon(
+                                imageVector = Icons.Rounded.ContentPaste,
+                                contentDescription = null,
+                                tint = TextSecondary,
+                                modifier = Modifier.size(17.dp),
+                            )
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Pegar")
+                            Text("Pegar", style = MaterialTheme.typography.labelLarge, color = TextPrimary)
                         }
+
                         Button(
                             onClick = onSendText,
-                            enabled = isConnected && state.textInput.isNotBlank(),
-                            colors = ButtonDefaults.buttonColors(containerColor = AccentSky),
-                            modifier = Modifier.weight(1.3f),
+                            enabled = isConnected && state.textInput.isNotBlank() && !state.isSendingText,
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = AccentCyan,
+                                contentColor = Color(0xFF041318),
+                                disabledContainerColor = SurfaceElevated,
+                                disabledContentColor = TextTertiary,
+                            ),
+                            modifier = Modifier
+                                .weight(1.35f)
+                                .height(44.dp),
                         ) {
-                            Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = null, modifier = Modifier.size(18.dp))
+                            if (state.isSendingText) {
+                                CircularProgressIndicator(
+                                    strokeWidth = 2.dp,
+                                    color = Color(0xFF041318),
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.AutoMirrored.Rounded.Send,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(17.dp),
+                                )
+                            }
                             Spacer(modifier = Modifier.width(6.dp))
-                            Text("Enviar a PC")
+                            Text(
+                                text = if (state.isSendingText) "Enviando…" else "Enviar",
+                                style = MaterialTheme.typography.labelLarge,
+                            )
                         }
                     }
                 }
             }
         }
 
+        // 2-Column Large Media & File Picker Cards
         item {
             Row(
-                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                FilledTonalButton(
+                QuickActionTile(
+                    icon = Icons.Rounded.PhotoLibrary,
+                    accentColor = AccentCyanLight,
+                    title = "Galería",
+                    subtitle = "Fotos · Videos · GIFs",
+                    onClick = onPickGallery,
+                    modifier = Modifier.weight(1f),
+                )
+                QuickActionTile(
+                    icon = Icons.Rounded.AttachFile,
+                    accentColor = AccentEmerald,
+                    title = "Archivos",
+                    subtitle = "Audio · PDF · ZIP · APK",
                     onClick = onPickAnyFiles,
-                    shape = RoundedCornerShape(14.dp),
-                    contentPadding = PaddingValues(vertical = 16.dp, horizontal = 12.dp),
                     modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.AttachFile, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Archivos (2 GB)", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-                FilledTonalButton(
-                    onClick = onPickMedia,
-                    shape = RoundedCornerShape(14.dp),
-                    contentPadding = PaddingValues(vertical = 16.dp, horizontal = 12.dp),
-                    modifier = Modifier.weight(1f),
-                ) {
-                    Icon(Icons.Rounded.PhotoLibrary, contentDescription = null)
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text("Fotos / Audio", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
+                )
             }
         }
 
-        if (state.sentItems.isNotEmpty()) {
+        // Recent sends compact preview
+        if (recentSent.isNotEmpty()) {
             item {
-                Text(
-                    text = "Enviados recientemente",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = TextMuted,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 4.dp),
+                ) {
+                    Text(
+                        text = "RECIENTES",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextTertiary,
+                    )
+                    TextButton(
+                        onClick = onOpenHistory,
+                        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+                    ) {
+                        Text(
+                            text = "Ver historial",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = AccentCyanLight,
+                        )
+                    }
+                }
             }
-            items(state.sentItems, key = { it.id }) { item ->
-                TransferItemCard(
+            items(recentSent, key = { it.id }) { item ->
+                HistoryItemCard(
                     item = item,
-                    showDownload = false,
+                    baseUrl = baseUrl,
+                    isDownloading = state.downloadingItemId == item.id,
+                    isDownloaded = item.id in state.downloadedItemIds,
                     onCopyText = onCopyText,
                     onOpenLink = onOpenLink,
-                    onDownloadFile = {},
+                    onDownloadFile = onDownloadFile,
+                    onPreviewImage = onPreviewImage,
                 )
             }
         }
@@ -520,232 +790,297 @@ private fun SendTabContent(
 }
 
 @Composable
-private fun ReceivedTabContent(
-    items: List<TransferItem>,
+private fun QuickActionTile(
+    icon: ImageVector,
+    accentColor: Color,
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        color = SurfaceCard,
+        shape = RoundedCornerShape(18.dp),
+        border = BorderStroke(1.dp, BorderSubtle),
+        modifier = modifier
+            .clip(RoundedCornerShape(18.dp))
+            .clickable(onClick = onClick),
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(42.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(accentColor.copy(alpha = 0.13f)),
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = accentColor,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleSmall,
+                    color = TextPrimary,
+                )
+                Text(
+                    text = subtitle,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextTertiary,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun HistoryScreen(
+    allItems: List<TransferItem>,
+    baseUrl: String?,
+    searchQuery: String,
+    selectedFilter: HistoryFilter,
+    downloadingItemId: String?,
+    downloadedItemIds: Set<String>,
+    activeTransfer: TransferProgress?,
+    onSearchChange: (String) -> Unit,
+    onFilterChange: (HistoryFilter) -> Unit,
     onRefresh: () -> Unit,
+    onCancelTransfer: () -> Unit,
     onCopyText: (String) -> Unit,
     onOpenLink: (String) -> Unit,
     onDownloadFile: (TransferItem) -> Unit,
+    onPreviewImage: (TransferItem, String) -> Unit,
 ) {
-    if (items.isEmpty()) {
-        Box(
-            contentAlignment = Alignment.Center,
-            modifier = Modifier.fillMaxSize(),
-        ) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(
-                    imageVector = Icons.Rounded.Inbox,
-                    contentDescription = null,
-                    tint = TextMuted,
-                    modifier = Modifier.size(44.dp),
-                )
-                Spacer(modifier = Modifier.height(10.dp))
-                Text("Aún no recibiste nada desde tu PC", color = TextMuted)
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    "Arrastra archivos o pega links en http://localhost:8765 en tu PC.",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = TextMuted,
-                )
-                Spacer(modifier = Modifier.height(12.dp))
-                OutlinedButton(onClick = onRefresh) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("Actualizar")
-                }
+    val filteredItems = remember(allItems, searchQuery, selectedFilter) {
+        val q = searchQuery.trim().lowercase()
+        allItems.filter { item ->
+            val matchesFilter = when (selectedFilter) {
+                HistoryFilter.ALL -> true
+                HistoryFilter.FROM_PC -> item.direction == "to_phone"
+                HistoryFilter.SENT -> item.direction == "to_pc"
+                HistoryFilter.LINKS -> item.kind == "link"
+                HistoryFilter.FILES -> item.kind == "file"
             }
+            if (!matchesFilter) return@filter false
+            if (q.isEmpty()) return@filter true
+            val hay = listOfNotNull(item.filename, item.content, item.sender, item.mimeType)
+                .joinToString(" ")
+                .lowercase()
+            hay.contains(q)
         }
-        return
     }
 
-    LazyColumn(
-        contentPadding = PaddingValues(bottom = 24.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
+    val groupedSections = remember(filteredItems) {
+        val order = listOf("Hoy", "Ayer", "Anteriores")
+        val map = filteredItems.groupBy { chronologicalSectionLabel(it.createdAt) }
+        order.mapNotNull { label -> map[label]?.let { label to it } }
+    }
+
+    Column(
         modifier = Modifier.fillMaxSize(),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        items(items, key = { it.id }) { item ->
-            TransferItemCard(
-                item = item,
-                showDownload = true,
-                onCopyText = onCopyText,
-                onOpenLink = onOpenLink,
-                onDownloadFile = { onDownloadFile(item) },
-            )
-        }
-    }
-}
-
-@Composable
-private fun TransferItemCard(
-    item: TransferItem,
-    showDownload: Boolean,
-    onCopyText: (String) -> Unit,
-    onOpenLink: (String) -> Unit,
-    onDownloadFile: () -> Unit,
-) {
-    val icon = when {
-        item.kind == "link" -> Icons.Rounded.Link
-        item.kind == "file" && item.mimeType.startsWith("image/") -> Icons.Rounded.Image
-        item.kind == "file" && item.mimeType.startsWith("audio/") -> Icons.Rounded.AudioFile
-        item.kind == "file" -> Icons.Rounded.Description
-        else -> Icons.Rounded.Description
-    }
-
-    Card(
-        colors = CardDefaults.cardColors(containerColor = SurfaceCard),
-        shape = RoundedCornerShape(14.dp),
-        modifier = Modifier.fillMaxWidth(),
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(icon, contentDescription = null, tint = AccentSky, modifier = Modifier.size(20.dp))
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = when (item.kind) {
-                        "file" -> item.filename ?: "Archivo"
-                        "link" -> "Enlace"
-                        else -> "Texto"
-                    },
-                    style = MaterialTheme.typography.titleSmall,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.weight(1f),
-                )
-                Text(
-                    text = if (item.kind == "file") formatBytes(item.sizeBytes) else item.sender,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = TextMuted,
-                )
-            }
-
-            if (item.kind != "file" && !item.content.isNullOrBlank()) {
-                Spacer(modifier = Modifier.height(6.dp))
-                Text(
-                    text = item.content,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = if (item.kind == "link") AccentSky else MaterialTheme.colorScheme.onSurface,
-                    maxLines = 4,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-
-            Spacer(modifier = Modifier.height(10.dp))
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (item.kind == "link" && !item.content.isNullOrBlank()) {
-                    FilledTonalButton(onClick = { onOpenLink(item.content) }) {
-                        Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Abrir")
-                    }
-                    OutlinedButton(onClick = { onCopyText(item.content) }) {
-                        Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copiar")
-                    }
-                } else if (item.kind == "text" && !item.content.isNullOrBlank()) {
-                    OutlinedButton(onClick = { onCopyText(item.content) }) {
-                        Icon(Icons.Rounded.ContentCopy, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Copiar")
-                    }
-                } else if (item.kind == "file" && showDownload && item.fileExists) {
-                    Button(
-                        onClick = onDownloadFile,
-                        colors = ButtonDefaults.buttonColors(containerColor = AccentMint),
-                    ) {
-                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(16.dp))
-                        Spacer(modifier = Modifier.width(6.dp))
-                        Text("Descargar y abrir")
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConnectionDialog(
-    discovered: List<ServerEndpoint>,
-    initialHost: String,
-    initialPort: String,
-    useManual: Boolean,
-    onDismiss: () -> Unit,
-    onSelectDiscovered: (ServerEndpoint) -> Unit,
-    onConnectManual: (String, String) -> Unit,
-    onEnableAuto: () -> Unit,
-) {
-    var host by remember(initialHost) { mutableStateOf(initialHost) }
-    var port by remember(initialPort) { mutableStateOf(initialPort) }
-
-    AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("Conexión con la PC") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                if (discovered.isNotEmpty()) {
-                    Text("PCs detectadas automáticamente (mDNS):", style = MaterialTheme.typography.labelMedium, color = TextMuted)
-                    discovered.forEach { server ->
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clip(RoundedCornerShape(10.dp))
-                                .background(SurfaceElevated)
-                                .clickable { onSelectDiscovered(server) }
-                                .padding(10.dp),
-                        ) {
-                            Icon(Icons.Rounded.Computer, contentDescription = null, tint = AccentMint)
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Column {
-                                Text(server.name, fontWeight = FontWeight.SemiBold)
-                                Text("${server.host}:${server.port}", style = MaterialTheme.typography.bodySmall, color = TextMuted)
-                            }
+        // Compact search bar + refresh button
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(top = 6.dp),
+        ) {
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchChange,
+                placeholder = { Text("Buscar archivos, links…", color = TextTertiary, style = MaterialTheme.typography.bodyMedium) },
+                singleLine = true,
+                leadingIcon = {
+                    Icon(
+                        imageVector = Icons.Rounded.Search,
+                        contentDescription = null,
+                        tint = TextTertiary,
+                        modifier = Modifier.size(18.dp),
+                    )
+                },
+                trailingIcon = {
+                    if (searchQuery.isNotEmpty()) {
+                        IconButton(onClick = { onSearchChange("") }) {
+                            Icon(
+                                imageVector = Icons.Rounded.Close,
+                                contentDescription = "Limpiar búsqueda",
+                                tint = TextTertiary,
+                                modifier = Modifier.size(17.dp),
+                            )
                         }
                     }
-                    HorizontalDivider()
-                } else {
-                    Text(
-                        "Si el router bloquea mDNS, ingresa la IP LAN que muestra el icono de la bandeja en Windows.",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextMuted,
+                },
+                shape = RoundedCornerShape(12.dp),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedBorderColor = AccentCyan,
+                    unfocusedBorderColor = BorderSubtle,
+                    focusedContainerColor = SurfaceCard,
+                    unfocusedContainerColor = SurfaceCard,
+                    cursorColor = AccentCyan,
+                    focusedTextColor = TextPrimary,
+                    unfocusedTextColor = TextPrimary,
+                ),
+                modifier = Modifier.weight(1f),
+            )
+
+            Surface(
+                color = SurfaceCard,
+                shape = RoundedCornerShape(12.dp),
+                border = BorderStroke(1.dp, BorderSubtle),
+                modifier = Modifier.size(52.dp),
+            ) {
+                IconButton(onClick = onRefresh) {
+                    Icon(
+                        imageVector = Icons.Rounded.Refresh,
+                        contentDescription = "Actualizar historial",
+                        tint = TextSecondary,
                     )
                 }
+            }
+        }
 
-                OutlinedTextField(
-                    value = host,
-                    onValueChange = { host = it },
-                    label = { Text("IP de la PC (ej. 192.168.1.50)") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
+        // Horizontal filter chips
+        LazyRow(
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            items(HistoryFilter.entries) { filter ->
+                val selected = filter == selectedFilter
+                FilterChip(
+                    selected = selected,
+                    onClick = { onFilterChange(filter) },
+                    label = {
+                        Text(
+                            text = filter.label,
+                            style = MaterialTheme.typography.labelMedium,
+                        )
+                    },
+                    shape = RoundedCornerShape(999.dp),
+                    colors = FilterChipDefaults.filterChipColors(
+                        containerColor = SurfaceCard,
+                        labelColor = TextSecondary,
+                        selectedContainerColor = AccentCyan.copy(alpha = 0.16f),
+                        selectedLabelColor = AccentCyanLight,
+                    ),
+                    border = FilterChipDefaults.filterChipBorder(
+                        enabled = true,
+                        selected = selected,
+                        borderColor = BorderSubtle,
+                        selectedBorderColor = AccentCyan.copy(alpha = 0.45f),
+                    ),
                 )
-                OutlinedTextField(
-                    value = port,
-                    onValueChange = { port = it.filter { ch -> ch.isDigit() } },
-                    label = { Text("Puerto") },
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+            }
+        }
 
-                if (useManual) {
-                    TextButton(onClick = onEnableAuto) {
-                        Text("Volver a detección automática (mDNS)")
+        AnimatedVisibility(
+            visible = activeTransfer != null,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            activeTransfer?.let { progress ->
+                ActiveTransferCard(progress = progress, onCancel = onCancelTransfer)
+            }
+        }
+
+        if (groupedSections.isEmpty()) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            ) {
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.History,
+                        contentDescription = null,
+                        tint = TextTertiary,
+                        modifier = Modifier.size(40.dp),
+                    )
+                    Text(
+                        text = if (allItems.isEmpty()) {
+                            "Aún no hay transferencias"
+                        } else {
+                            "Sin resultados para este filtro"
+                        },
+                        style = MaterialTheme.typography.titleSmall,
+                        color = TextSecondary,
+                    )
+                    Text(
+                        text = if (allItems.isEmpty()) {
+                            "Lo que envíes o recibas desde tu PC aparecerá aquí."
+                        } else {
+                            "Prueba otra búsqueda o cambia el chip de filtro."
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextTertiary,
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                contentPadding = PaddingValues(top = 2.dp, bottom = 24.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+            ) {
+                groupedSections.forEach { (sectionLabel, itemsInSection) ->
+                    item(key = "header_$sectionLabel") {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(top = 6.dp, bottom = 2.dp),
+                        ) {
+                            Text(
+                                text = sectionLabel.uppercase(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = TextTertiary,
+                            )
+                            Text(
+                                text = "(${itemsInSection.size})",
+                                style = MonoTextStyle.copy(fontSize = 11.sp),
+                                color = TextTertiary,
+                            )
+                            HorizontalDivider(
+                                thickness = 1.dp,
+                                color = BorderSubtle,
+                                modifier = Modifier.weight(1f),
+                            )
+                        }
+                    }
+                    items(itemsInSection, key = { it.id }) { item ->
+                        HistoryItemCard(
+                            item = item,
+                            baseUrl = baseUrl,
+                            isDownloading = downloadingItemId == item.id,
+                            isDownloaded = item.id in downloadedItemIds,
+                            onCopyText = onCopyText,
+                            onOpenLink = onOpenLink,
+                            onDownloadFile = onDownloadFile,
+                            onPreviewImage = onPreviewImage,
+                        )
                     }
                 }
             }
-        },
-        confirmButton = {
-            Button(onClick = { onConnectManual(host, port) }) {
-                Text("Conectar IP")
-            }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cerrar")
-            }
-        },
-    )
+        }
+    }
 }
 
 private fun readClipboardText(context: Context): String? {

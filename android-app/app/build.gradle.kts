@@ -78,5 +78,8 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:okhttp-sse:4.12.0")
 
+    // Image & GIF thumbnails from LAN server
+    implementation("io.coil-kt:coil-compose:2.7.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
 }
