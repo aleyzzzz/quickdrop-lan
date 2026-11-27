@@ -19,6 +19,9 @@ MAX_FILE_SIZE_BYTES = 2 * 1024 * 1024 * 1024  # 2 GiB
 STREAM_CHUNK_SIZE = 1024 * 1024  # 1 MiB chunks for low RAM streaming
 MAX_HISTORY_ITEMS = 500
 MDNS_SERVICE_TYPE = "_quickdrop._tcp.local."
+DEFAULT_OUTBOX_TTL_MINUTES = 60
+OUTBOX_CLEANUP_INTERVAL_SECONDS = 300.0  # 5 minutes
+AFTER_DOWNLOAD_DELETE_DELAY_SECONDS = 120.0  # 2 minutes
 
 
 def is_frozen() -> bool:
@@ -59,6 +62,18 @@ def get_default_download_dir() -> Path:
     return path
 
 
+def get_default_outbox_dir(data_dir: Path | None = None) -> Path:
+    """Return isolated temporary outbox folder (%APPDATA%\\QuickDropLAN\\outbox) for PC -> Phone copies."""
+    env_dir = os.environ.get("QUICKDROP_OUTBOX_DIR")
+    if env_dir:
+        path = Path(env_dir).expanduser().resolve()
+    else:
+        base = data_dir if data_dir is not None else get_default_data_dir()
+        path = base / "outbox"
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
 @dataclass
 class AppSettings:
     port: int = DEFAULT_PORT
@@ -69,17 +84,19 @@ class AppSettings:
     notifications_enabled: bool = True
     mdns_enabled: bool = True
     device_name: str = ""
+    outbox_ttl_minutes: int = DEFAULT_OUTBOX_TTL_MINUTES
+    auto_delete_after_download: bool = True
 
     def resolved_download_dir(self) -> Path:
         path = Path(self.download_dir) if self.download_dir else get_default_download_dir()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
-    def resolved_outbox_dir(self) -> Path:
+    def resolved_outbox_dir(self, data_dir: Path | None = None) -> Path:
         if self.outbox_dir:
-            path = Path(self.outbox_dir)
+            path = Path(self.outbox_dir).expanduser().resolve()
         else:
-            path = self.resolved_download_dir() / "Outbox"
+            path = get_default_outbox_dir(data_dir)
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -96,6 +113,12 @@ class SettingsManager:
         self.settings_path = self.data_dir / "settings.json"
         self._overrides = overrides or {}
         self.settings = self._load()
+
+    def download_dir(self) -> Path:
+        return self.settings.resolved_download_dir()
+
+    def outbox_dir(self) -> Path:
+        return self.settings.resolved_outbox_dir(self.data_dir)
 
     def _load(self) -> AppSettings:
         raw: dict[str, Any] = {}

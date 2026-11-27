@@ -1,4 +1,4 @@
-"""Streaming file storage and atomic JSON history store for QuickDrop LAN."""
+"""Streaming file storage, strict outbox cleanup cage, and atomic JSON history store."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import os
 import re
 import threading
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator
 from urllib.parse import unquote
@@ -90,6 +90,54 @@ def guess_mime_type(filename: str, provided: str | None = None) -> str:
     return guessed or "application/octet-stream"
 
 
+def is_strictly_inside_outbox(file_path: Path, outbox_dir: Path) -> bool:
+    """Strict safety cage: returns True ONLY if resolved file_path is strictly inside outbox_dir."""
+    try:
+        resolved_outbox = outbox_dir.resolve()
+        resolved_file = file_path.resolve()
+        return resolved_file != resolved_outbox and resolved_file.is_relative_to(resolved_outbox)
+    except OSError:
+        return False
+
+
+def safe_delete_outbox_file(file_path: Path, outbox_dir: Path) -> bool:
+    """Delete a temporary outbox file ONLY if it resides strictly inside outbox_dir.
+
+    Never touches files inside Downloads\\QuickDrop or anywhere outside outbox_dir.
+    """
+    if not is_strictly_inside_outbox(file_path, outbox_dir):
+        return False
+    try:
+        if file_path.is_file() or file_path.is_symlink():
+            file_path.unlink(missing_ok=True)
+            return True
+    except OSError:
+        return False
+    return False
+
+
+def get_outbox_stats(outbox_dir: Path) -> dict[str, int]:
+    """Return total bytes and file count currently stored inside outbox_dir."""
+    total_bytes = 0
+    file_count = 0
+    if not outbox_dir.is_dir():
+        return {"total_bytes": 0, "file_count": 0}
+    try:
+        for entry in outbox_dir.iterdir():
+            if entry.name.endswith(".part") or not entry.is_file():
+                continue
+            if not is_strictly_inside_outbox(entry, outbox_dir):
+                continue
+            try:
+                total_bytes += entry.stat().st_size
+                file_count += 1
+            except OSError:
+                continue
+    except OSError:
+        pass
+    return {"total_bytes": total_bytes, "file_count": file_count}
+
+
 async def save_stream_to_disk(
     stream: AsyncIterator[bytes],
     destination_dir: Path,
@@ -162,7 +210,7 @@ async def iter_file_chunks(
 
 
 class HistoryStore:
-    """Thread-safe, bounded JSON history store with atomic writes."""
+    """Thread-safe, bounded JSON history store with atomic writes and safe outbox cleanup."""
 
     def __init__(self, history_path: Path, max_items: int = MAX_HISTORY_ITEMS) -> None:
         self.history_path = history_path
@@ -202,6 +250,7 @@ class HistoryStore:
         size_bytes: int = 0,
         sha256: str | None = None,
         sender: str = "Unknown",
+        is_temp_outbox: bool = False,
     ) -> dict[str, Any]:
         item: dict[str, Any] = {
             "id": uuid.uuid4().hex,
@@ -216,6 +265,8 @@ class HistoryStore:
             "sender": sender,
             "created_at": iso_now(),
             "downloaded_by_phone": False,
+            "is_temp_outbox": bool(is_temp_outbox),
+            "file_expired": False,
         }
         with self._lock:
             self._items.insert(0, item)
@@ -251,23 +302,162 @@ class HistoryStore:
                     return dict(item)
         return None
 
-    def remove_item(self, item_id: str) -> bool:
-        """Remove an entry from history JSON without deleting user files on disk."""
+    def mark_expired(self, item_id: str) -> dict[str, Any] | None:
         with self._lock:
-            before = len(self._items)
-            self._items = [i for i in self._items if i.get("id") != item_id]
-            if len(self._items) != before:
+            for item in self._items:
+                if item.get("id") == item_id:
+                    item["file_expired"] = True
+                    self._persist()
+                    return dict(item)
+        return None
+
+    def remove_item(self, item_id: str) -> dict[str, Any] | None:
+        """Remove an entry from history JSON and return the removed record (or None)."""
+        with self._lock:
+            for idx, item in enumerate(self._items):
+                if item.get("id") == item_id:
+                    removed = self._items.pop(idx)
+                    self._persist()
+                    return dict(removed)
+        return None
+
+    def cleanup_expired_outbox(
+        self,
+        outbox_dir: Path,
+        ttl_minutes: int,
+        *,
+        now: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        """Delete temporary outbox files older than ttl_minutes and mark history entries expired."""
+        if ttl_minutes <= 0:
+            return []
+
+        ref_now = now if now is not None else datetime.now().astimezone()
+        cutoff = ref_now - timedelta(minutes=ttl_minutes)
+        cutoff_ts = cutoff.timestamp()
+        updated_views: list[dict[str, Any]] = []
+        changed = False
+
+        with self._lock:
+            for item in self._items:
+                if (
+                    item.get("kind") != "file"
+                    or item.get("direction") != "to_phone"
+                    or not item.get("is_temp_outbox")
+                ):
+                    continue
+                stored = item.get("stored_path")
+                if not stored:
+                    continue
+
+                created_dt = _parse_iso_datetime(item.get("created_at"))
+                file_path = Path(stored)
+                is_old = False
+                if created_dt is not None:
+                    is_old = created_dt.timestamp() <= cutoff_ts
+                elif is_strictly_inside_outbox(file_path, outbox_dir) and file_path.is_file():
+                    try:
+                        is_old = file_path.stat().st_mtime <= cutoff_ts
+                    except OSError:
+                        is_old = False
+
+                if not is_old:
+                    continue
+
+                deleted = safe_delete_outbox_file(file_path, outbox_dir)
+                if deleted or (not item.get("file_expired") and not file_path.exists()):
+                    item["file_expired"] = True
+                    changed = True
+                    updated_views.append(public_item_view(item))
+
+            if changed:
                 self._persist()
-                return True
-        return False
+
+        # Also clean orphaned expired files strictly inside outbox_dir (skipping active .part)
+        if outbox_dir.is_dir():
+            try:
+                for entry in list(outbox_dir.iterdir()):
+                    if entry.name.endswith(".part") or not entry.is_file():
+                        continue
+                    if not is_strictly_inside_outbox(entry, outbox_dir):
+                        continue
+                    try:
+                        if entry.stat().st_mtime <= cutoff_ts:
+                            safe_delete_outbox_file(entry, outbox_dir)
+                    except OSError:
+                        continue
+            except OSError:
+                pass
+
+        return updated_views
+
+    def clear_outbox(self, outbox_dir: Path) -> tuple[int, int, list[dict[str, Any]]]:
+        """Delete all temporary files strictly inside outbox_dir and mark matching history entries expired."""
+        deleted_count = 0
+        freed_bytes = 0
+
+        if outbox_dir.is_dir():
+            try:
+                for entry in list(outbox_dir.iterdir()):
+                    if entry.name.endswith(".part") or not entry.is_file():
+                        continue
+                    if not is_strictly_inside_outbox(entry, outbox_dir):
+                        continue
+                    try:
+                        size = entry.stat().st_size
+                    except OSError:
+                        size = 0
+                    if safe_delete_outbox_file(entry, outbox_dir):
+                        deleted_count += 1
+                        freed_bytes += size
+            except OSError:
+                pass
+
+        updated_views: list[dict[str, Any]] = []
+        changed = False
+        with self._lock:
+            for item in self._items:
+                if (
+                    item.get("kind") == "file"
+                    and item.get("direction") == "to_phone"
+                    and item.get("is_temp_outbox")
+                    and not item.get("file_expired")
+                ):
+                    stored = item.get("stored_path")
+                    if stored:
+                        safe_delete_outbox_file(Path(stored), outbox_dir)
+                    item["file_expired"] = True
+                    changed = True
+                    updated_views.append(public_item_view(item))
+            if changed:
+                self._persist()
+
+        return deleted_count, freed_bytes, updated_views
+
+
+def _parse_iso_datetime(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value)
+        if dt.tzinfo is None:
+            dt = dt.astimezone()
+        return dt
+    except ValueError:
+        return None
 
 
 def public_item_view(item: dict[str, Any]) -> dict[str, Any]:
-    """Return API-safe item representation with download URL when applicable."""
+    """Return API-safe item representation with accurate file_exists and outbox flags."""
     view = dict(item)
+    view["is_temp_outbox"] = bool(view.get("is_temp_outbox", False))
+    view["file_expired"] = bool(view.get("file_expired", False))
     if view.get("kind") == "file" and view.get("stored_path"):
         view["download_url"] = f"/api/files/{view['id']}"
-        view["file_exists"] = Path(view["stored_path"]).exists()
+        try:
+            view["file_exists"] = Path(view["stored_path"]).is_file()
+        except OSError:
+            view["file_exists"] = False
     else:
         view["download_url"] = None
         view["file_exists"] = False

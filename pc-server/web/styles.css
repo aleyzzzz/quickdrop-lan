@@ -753,6 +753,95 @@ button:disabled {
   transition: width 0.09s linear;
 }
 
+/* --- Compact Temporary Outbox Controls --- */
+.outbox-strip {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.outbox-info {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.outbox-size {
+  font-size: 0.74rem;
+  color: var(--text-2);
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.outbox-ttl-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.74rem;
+  color: var(--text-3);
+}
+
+.outbox-select {
+  height: 26px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 0.73rem;
+  outline: none;
+  cursor: pointer;
+}
+
+.outbox-select:focus {
+  border-color: rgba(34, 211, 238, 0.45);
+}
+
+.outbox-clear-btn {
+  height: 26px;
+  padding: 0 9px;
+  font-size: 0.73rem;
+}
+
+.outbox-clear-btn:hover:not(:disabled) {
+  background: var(--danger-soft);
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--danger);
+}
+
+.file-missing-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 0.68rem;
+  font-weight: 500;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+.file-missing-badge.moved {
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--amber);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+}
+
+.file-missing-badge.expired {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-3);
+  border: 1px solid var(--border);
+}
+
 /* --- History Controls --- */
 .history-panel {
   min-width: 0;

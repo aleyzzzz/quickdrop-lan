@@ -81,6 +81,9 @@
       clearStagedBtn: document.getElementById("clear-staged-btn"),
       sendStagedBtn: document.getElementById("send-staged-btn"),
       uploadQueue: document.getElementById("upload-queue"),
+      outboxSizeLabel: document.getElementById("outbox-size-label"),
+      outboxTtlSelect: document.getElementById("outbox-ttl-select"),
+      clearOutboxBtn: document.getElementById("clear-outbox-btn"),
       searchInput: document.getElementById("search-input"),
       searchClearBtn: document.getElementById("search-clear-btn"),
       viewCardsBtn: document.getElementById("view-cards-btn"),
@@ -118,6 +121,22 @@
       if (els.sseLabel) {
         els.sseLabel.textContent = labelText || (online ? "Conectado" : "Reconectando…");
         els.sseLabel.classList.toggle("online", Boolean(online));
+      }
+    }
+
+    function updateOutboxIndicator(totalBytes, fileCount, ttlMinutes) {
+      if (els.outboxSizeLabel && typeof totalBytes === "number") {
+        els.outboxSizeLabel.textContent = `Temp: ${formatSize(totalBytes)}`;
+        const countLabel = typeof fileCount === "number" ? ` (${fileCount} archivo${fileCount === 1 ? "" : "s"})` : "";
+        els.outboxSizeLabel.title = `Copias temporales de envío PC → Teléfono${countLabel}`;
+      }
+      if (els.clearOutboxBtn && typeof totalBytes === "number") {
+        els.clearOutboxBtn.disabled = totalBytes <= 0 && (fileCount || 0) <= 0;
+      }
+      if (els.outboxTtlSelect && typeof ttlMinutes === "number") {
+        const strVal = String(ttlMinutes);
+        const hasOption = Array.from(els.outboxTtlSelect.options).some((o) => o.value === strVal);
+        if (hasOption) els.outboxTtlSelect.value = strVal;
       }
     }
 
@@ -360,12 +379,17 @@
             <audio class="audio-player" controls preload="none" src="${inlineUrl}"></audio>
           `;
         } else {
+          const missingBadge = !item.file_exists
+            ? item.file_expired || item.is_temp_outbox
+              ? `<span class="file-missing-badge expired">Temporal limpiado</span>`
+              : `<span class="file-missing-badge moved">Movido o eliminado</span>`
+            : "";
           contentHtml = `
             <div class="file-headline">
               <div class="file-type-ico" aria-hidden="true">${ICONS.file}</div>
               <div class="file-name-wrap">
                 <span class="file-name" title="${fname}">${fname}</span>
-                <span class="file-sub mono">${sizeStr}</span>
+                <span class="file-sub mono">${sizeStr}${missingBadge}</span>
               </div>
             </div>
           `;
@@ -417,12 +441,17 @@
         } else if (item.file_exists && isVideoItem(item)) {
           leadingHtml = `<div class="row-ico" style="cursor:zoom-in;color:var(--cyan)" data-action="lightbox" data-id="${item.id}" title="Reproducir">${ICONS.video}</div>`;
           mainHtml = `<span style="cursor:zoom-in" data-action="lightbox" data-id="${item.id}" title="${fname}">${fname}</span>`;
-        } else if (isAudioItem(item)) {
+        } else if (item.file_exists && isAudioItem(item)) {
           leadingHtml = `<div class="row-ico" style="color:var(--emerald)">${ICONS.audio}</div>`;
           mainHtml = `<span title="${fname}">${fname}</span>`;
         } else {
+          const missingBadge = !item.file_exists
+            ? item.file_expired || item.is_temp_outbox
+              ? `<span class="file-missing-badge expired">Temporal limpiado</span>`
+              : `<span class="file-missing-badge moved">Movido o eliminado</span>`
+            : "";
           leadingHtml = `<div class="row-ico">${ICONS.file}</div>`;
-          mainHtml = `<span title="${fname}">${fname}</span>`;
+          mainHtml = `<span title="${fname}">${fname}${missingBadge}</span>`;
         }
       }
 
@@ -815,6 +844,11 @@
         if (els.autoCopyToggle) {
           els.autoCopyToggle.checked = Boolean(state.info.auto_copy_clipboard);
         }
+        updateOutboxIndicator(
+          state.info.outbox_size_bytes || 0,
+          state.info.outbox_file_count || 0,
+          typeof state.info.outbox_ttl_minutes === "number" ? state.info.outbox_ttl_minutes : 60
+        );
       } catch (err) {
         if (els.deviceMeta) els.deviceMeta.textContent = "PC Local";
         console.warn("Error cargando /api/info:", err);
@@ -882,6 +916,15 @@
           if (els.autoCopyToggle && typeof data.auto_copy_clipboard === "boolean") {
             els.autoCopyToggle.checked = data.auto_copy_clipboard;
           }
+          if (typeof data.outbox_ttl_minutes === "number") {
+            updateOutboxIndicator(undefined, undefined, data.outbox_ttl_minutes);
+          }
+        } catch {}
+      });
+      source.addEventListener("outbox_updated", (evt) => {
+        try {
+          const data = JSON.parse(evt.data);
+          updateOutboxIndicator(data.total_bytes, data.file_count, data.outbox_ttl_minutes);
         } catch {}
       });
       source.onerror = () => setConnectionStatus(false, "Reconectando…");
@@ -1072,6 +1115,46 @@
           await fetchWithTimeout("/api/open-downloads", { method: "POST" });
         } catch {
           showToast("No se pudo abrir la carpeta.");
+        }
+      });
+    }
+
+    if (els.outboxTtlSelect) {
+      els.outboxTtlSelect.addEventListener("change", async () => {
+        const minutes = Number(els.outboxTtlSelect.value);
+        try {
+          const res = await fetchWithTimeout("/api/settings", {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ outbox_ttl_minutes: minutes }),
+          });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const label = els.outboxTtlSelect.options[els.outboxTtlSelect.selectedIndex]?.text || "";
+          showToast(minutes === 0 ? "Auto-borrado temporal en modo Manual" : `Auto-borrado temporal ajustado a ${label}`);
+        } catch {
+          showToast("No se pudo guardar el tiempo de auto-borrado.");
+        }
+      });
+    }
+
+    if (els.clearOutboxBtn) {
+      els.clearOutboxBtn.addEventListener("click", async () => {
+        els.clearOutboxBtn.disabled = true;
+        try {
+          const res = await fetchWithTimeout("/api/outbox/clear", { method: "POST" });
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          const data = await res.json();
+          updateOutboxIndicator(data.total_bytes || 0, data.file_count || 0, data.outbox_ttl_minutes);
+          await loadHistory();
+          const freed = formatSize(data.freed_bytes || 0);
+          showToast(
+            data.cleared_files > 0
+              ? `Temporales limpiados (${data.cleared_files} archivo${data.cleared_files === 1 ? "" : "s"}, ${freed} liberados)`
+              : "No había copias temporales por limpiar"
+          );
+        } catch {
+          showToast("No se pudieron limpiar los temporales.");
+          els.clearOutboxBtn.disabled = false;
         }
       });
     }

@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>QuickDrop LAN</title>
-  <link rel="stylesheet" href="/static/styles.css?v=4" />
+  <link rel="stylesheet" href="/static/styles.css?v=5" />
 </head>
 <body>
   <div class="app-shell">
@@ -124,6 +124,26 @@
 
         <!-- Active Streaming Upload Progress -->
         <div id="upload-queue" class="upload-queue"></div>
+
+        <!-- Compact Temporary Outbox Storage Controls -->
+        <div class="outbox-strip" aria-label="Gestión de copias temporales">
+          <div class="outbox-info">
+            <span class="outbox-size mono" id="outbox-size-label" title="Espacio usado por copias temporales de envío PC → Teléfono">Temp: 0 B</span>
+            <label class="outbox-ttl-wrap" title="Auto-borrado de copias temporales de envío">
+              <span>Auto:</span>
+              <select id="outbox-ttl-select" class="outbox-select" aria-label="Tiempo de auto-borrado de temporales">
+                <option value="15">15m</option>
+                <option value="30">30m</option>
+                <option value="60" selected>1h</option>
+                <option value="1440">24h</option>
+                <option value="0">Manual</option>
+              </select>
+            </label>
+          </div>
+          <button type="button" class="btn-subtle outbox-clear-btn" id="clear-outbox-btn" title="Vaciar copias temporales ahora (no borra archivos en Downloads/QuickDrop)">
+            Limpiar temporales
+          </button>
+        </div>
       </aside>
 
       <!-- Right Panel: Organized History Feed -->
@@ -256,6 +276,6 @@
   </div>
 
   <div id="toast" class="toast" aria-live="polite"></div>
-  <script src="/static/app.js?v=4"></script>
+  <script src="/static/app.js?v=5"></script>
 </body>
 </html>

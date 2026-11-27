@@ -21,9 +21,11 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import (
+    AFTER_DOWNLOAD_DELETE_DELAY_SECONDS,
     APP_NAME,
     APP_VERSION,
     MAX_FILE_SIZE_BYTES,
+    OUTBOX_CLEANUP_INTERVAL_SECONDS,
     STREAM_CHUNK_SIZE,
     SettingsManager,
     get_primary_lan_ip,
@@ -35,10 +37,12 @@ from storage import (
     FileTooLargeError,
     HistoryStore,
     detect_text_kind,
+    get_outbox_stats,
     guess_mime_type,
     iso_now,
     iter_file_chunks,
     public_item_view,
+    safe_delete_outbox_file,
     save_stream_to_disk,
 )
 
@@ -57,6 +61,8 @@ class TextPayload(BaseModel):
 class SettingsUpdatePayload(BaseModel):
     auto_copy_clipboard: bool | None = None
     notifications_enabled: bool | None = None
+    outbox_ttl_minutes: int | None = Field(default=None, ge=0, le=43200)
+    auto_delete_after_download: bool | None = None
 
 
 class EventHub:
@@ -119,11 +125,12 @@ def create_app(
     enable_mdns: bool = True,
     enable_notifications: bool = True,
     icon_path: Path | None = None,
+    after_download_delay_seconds: float = AFTER_DOWNLOAD_DELETE_DELAY_SECONDS,
+    cleanup_interval_seconds: float = OUTBOX_CLEANUP_INTERVAL_SECONDS,
 ) -> FastAPI:
     """Build and configure the QuickDrop LAN FastAPI application."""
     history = HistoryStore(settings_manager.data_dir / "history.json")
     hub = EventHub()
-    settings = settings_manager.settings
 
     notifier = DesktopNotifier(
         enabled_getter=lambda: enable_notifications and settings_manager.settings.notifications_enabled,
@@ -134,13 +141,108 @@ def create_app(
 
     mdns_advertiser: MdnsAdvertiser | None = None
     mdns_task: asyncio.Task[bool] | None = None
+    cleanup_task: asyncio.Task[None] | None = None
+    pending_deletes: dict[str, asyncio.Task[None]] = {}
+
+    def _publish_outbox_stats() -> dict[str, Any]:
+        stats = get_outbox_stats(settings_manager.outbox_dir())
+        payload = {
+            **stats,
+            "outbox_ttl_minutes": settings_manager.settings.outbox_ttl_minutes,
+            "auto_delete_after_download": settings_manager.settings.auto_delete_after_download,
+        }
+        hub.publish("outbox_updated", payload)
+        return payload
+
+    def _run_ttl_cleanup_sync() -> list[dict[str, Any]]:
+        ttl = settings_manager.settings.outbox_ttl_minutes
+        if ttl <= 0:
+            return []
+        return history.cleanup_expired_outbox(settings_manager.outbox_dir(), ttl)
+
+    async def _run_ttl_cleanup_and_notify() -> int:
+        updated = await asyncio.to_thread(_run_ttl_cleanup_sync)
+        if updated:
+            for view in updated:
+                hub.publish("item_updated", view)
+            _publish_outbox_stats()
+            logger.info("Limpieza TTL de outbox: %d copia(s) temporal(es) expirada(s).", len(updated))
+        return len(updated)
+
+    def _cancel_pending_delete(item_id: str) -> None:
+        task = pending_deletes.pop(item_id, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_outbox_delete_after_download(item_id: str) -> None:
+        if not settings_manager.settings.auto_delete_after_download:
+            return
+        item = history.get_item(item_id)
+        if (
+            not item
+            or item.get("kind") != "file"
+            or item.get("direction") != "to_phone"
+            or not item.get("is_temp_outbox")
+            or not item.get("stored_path")
+        ):
+            return
+        if item_id in pending_deletes and not pending_deletes[item_id].done():
+            return
+
+        async def _delayed_delete() -> None:
+            try:
+                await asyncio.sleep(max(0.0, after_download_delay_seconds))
+                if not settings_manager.settings.auto_delete_after_download:
+                    return
+                latest = history.get_item(item_id)
+                if (
+                    not latest
+                    or latest.get("direction") != "to_phone"
+                    or not latest.get("is_temp_outbox")
+                    or not latest.get("stored_path")
+                ):
+                    return
+                deleted = await asyncio.to_thread(
+                    safe_delete_outbox_file,
+                    Path(latest["stored_path"]),
+                    settings_manager.outbox_dir(),
+                )
+                if deleted or not Path(latest["stored_path"]).exists():
+                    expired = history.mark_expired(item_id)
+                    if expired:
+                        hub.publish("item_updated", public_item_view(expired))
+                    _publish_outbox_stats()
+                    logger.info(
+                        "Copia temporal eliminada tras descarga completa: %s",
+                        latest.get("filename"),
+                    )
+            except asyncio.CancelledError:
+                pass
+            finally:
+                pending_deletes.pop(item_id, None)
+
+        pending_deletes[item_id] = asyncio.create_task(_delayed_delete())
+
+    async def _outbox_cleanup_loop() -> None:
+        try:
+            while True:
+                await asyncio.sleep(max(5.0, cleanup_interval_seconds))
+                try:
+                    await _run_ttl_cleanup_and_notify()
+                except Exception as exc:
+                    logger.warning("Error en limpieza periódica de outbox: %s", exc)
+        except asyncio.CancelledError:
+            pass
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        nonlocal mdns_advertiser, mdns_task
-        # Ensure directories exist on startup
-        settings_manager.settings.resolved_download_dir()
-        settings_manager.settings.resolved_outbox_dir()
+        nonlocal mdns_advertiser, mdns_task, cleanup_task
+        # Ensure separate downloads and outbox directories exist on startup
+        settings_manager.download_dir()
+        settings_manager.outbox_dir()
+        # Run initial TTL sweep on startup and start periodic 5-minute cleaner
+        await _run_ttl_cleanup_and_notify()
+        cleanup_task = asyncio.create_task(_outbox_cleanup_loop())
         if enable_mdns and settings_manager.settings.mdns_enabled:
             mdns_advertiser = MdnsAdvertiser(
                 device_name=settings_manager.settings.resolved_device_name(),
@@ -149,12 +251,13 @@ def create_app(
             # Register mDNS in background thread so HTTP/Web UI is ready immediately
             mdns_task = asyncio.create_task(asyncio.to_thread(mdns_advertiser.start))
         logger.info(
-            "%s v%s iniciado en http://%s:%d (descargas: %s)",
+            "%s v%s iniciado en http://%s:%d (descargas: %s | outbox: %s)",
             APP_NAME,
             APP_VERSION,
             get_primary_lan_ip(),
             settings_manager.settings.port,
-            settings_manager.settings.resolved_download_dir(),
+            settings_manager.download_dir(),
+            settings_manager.outbox_dir(),
         )
         if os.name == "nt":
             try:
@@ -169,6 +272,12 @@ def create_app(
         try:
             yield
         finally:
+            if cleanup_task is not None and not cleanup_task.done():
+                cleanup_task.cancel()
+            for task in list(pending_deletes.values()):
+                if not task.done():
+                    task.cancel()
+            pending_deletes.clear()
             if mdns_task is not None and not mdns_task.done():
                 mdns_task.cancel()
             if mdns_advertiser is not None:
@@ -216,6 +325,7 @@ def create_app(
     async def info() -> dict[str, Any]:
         cfg = settings_manager.settings
         lan_ip = get_primary_lan_ip()
+        stats = await asyncio.to_thread(get_outbox_stats, settings_manager.outbox_dir())
         return {
             "app": APP_NAME,
             "version": APP_VERSION,
@@ -224,10 +334,47 @@ def create_app(
             "ip": lan_ip,
             "port": cfg.port,
             "lan_url": f"http://{lan_ip}:{cfg.port}",
-            "download_dir": str(cfg.resolved_download_dir()),
+            "download_dir": str(settings_manager.download_dir()),
+            "outbox_dir": str(settings_manager.outbox_dir()),
             "max_file_size_bytes": MAX_FILE_SIZE_BYTES,
             "auto_copy_clipboard": cfg.auto_copy_clipboard,
             "notifications_enabled": cfg.notifications_enabled,
+            "outbox_ttl_minutes": cfg.outbox_ttl_minutes,
+            "auto_delete_after_download": cfg.auto_delete_after_download,
+            "outbox_size_bytes": stats["total_bytes"],
+            "outbox_file_count": stats["file_count"],
+        }
+
+    @app.get("/api/outbox/stats")
+    async def outbox_stats() -> dict[str, Any]:
+        stats = await asyncio.to_thread(get_outbox_stats, settings_manager.outbox_dir())
+        return {
+            **stats,
+            "outbox_ttl_minutes": settings_manager.settings.outbox_ttl_minutes,
+            "auto_delete_after_download": settings_manager.settings.auto_delete_after_download,
+        }
+
+    @app.post("/api/outbox/clear")
+    async def clear_outbox_endpoint(request: Request) -> dict[str, Any]:
+        _ensure_loopback(request)
+        for item_id in list(pending_deletes.keys()):
+            _cancel_pending_delete(item_id)
+        deleted_count, freed_bytes, updated_views = await asyncio.to_thread(
+            history.clear_outbox,
+            settings_manager.outbox_dir(),
+        )
+        for view in updated_views:
+            hub.publish("item_updated", view)
+        stats = _publish_outbox_stats()
+        logger.info(
+            "Outbox limpiado manualmente: %d archivo(s), %d bytes liberados.",
+            deleted_count,
+            freed_bytes,
+        )
+        return {
+            "cleared_files": deleted_count,
+            "freed_bytes": freed_bytes,
+            **stats,
         }
 
     @app.patch("/api/settings")
@@ -236,18 +383,19 @@ def create_app(
         updated = settings_manager.update(
             auto_copy_clipboard=payload.auto_copy_clipboard,
             notifications_enabled=payload.notifications_enabled,
+            outbox_ttl_minutes=payload.outbox_ttl_minutes,
+            auto_delete_after_download=payload.auto_delete_after_download,
         )
-        hub.publish(
-            "settings_updated",
-            {
-                "auto_copy_clipboard": updated.auto_copy_clipboard,
-                "notifications_enabled": updated.notifications_enabled,
-            },
-        )
-        return {
+        if payload.outbox_ttl_minutes is not None and updated.outbox_ttl_minutes > 0:
+            await _run_ttl_cleanup_and_notify()
+        settings_payload = {
             "auto_copy_clipboard": updated.auto_copy_clipboard,
             "notifications_enabled": updated.notifications_enabled,
+            "outbox_ttl_minutes": updated.outbox_ttl_minutes,
+            "auto_delete_after_download": updated.auto_delete_after_download,
         }
+        hub.publish("settings_updated", settings_payload)
+        return settings_payload
 
     # --- Helpers for Text & File Transfers ---
 
@@ -297,6 +445,7 @@ def create_app(
         sender: str,
         direction: str,
     ) -> dict[str, Any]:
+        is_temp = direction == "to_phone"
         item = history.add_item(
             direction=direction,
             kind="file",
@@ -306,9 +455,12 @@ def create_app(
             size_bytes=size_bytes,
             sha256=sha256,
             sender=sender.strip() or ("Android" if direction == "to_pc" else "PC"),
+            is_temp_outbox=is_temp,
         )
         view = public_item_view(item)
         hub.publish("item_created", view)
+        if is_temp:
+            _publish_outbox_stats()
 
         if direction == "to_pc":
             await asyncio.to_thread(
@@ -358,9 +510,9 @@ def create_app(
         )
 
         dest_dir = (
-            settings_manager.settings.resolved_outbox_dir()
+            settings_manager.outbox_dir()
             if direction == "to_phone"
-            else settings_manager.settings.resolved_download_dir()
+            else settings_manager.download_dir()
         )
 
         try:
@@ -396,9 +548,9 @@ def create_app(
         direction: str,
     ) -> dict[str, Any]:
         dest_dir = (
-            settings_manager.settings.resolved_outbox_dir()
+            settings_manager.outbox_dir()
             if direction == "to_phone"
-            else settings_manager.settings.resolved_download_dir()
+            else settings_manager.download_dir()
         )
 
         async def _chunks() -> AsyncIterator[bytes]:
@@ -493,6 +645,8 @@ def create_app(
             raise HTTPException(status_code=404, detail="Elemento no encontrado.")
         view = public_item_view(updated)
         hub.publish("item_updated", view)
+        if updated.get("direction") == "to_phone" and updated.get("is_temp_outbox"):
+            _schedule_outbox_delete_after_download(item_id)
         return view
 
     @app.delete("/api/items/{item_id}")
@@ -500,8 +654,23 @@ def create_app(
         removed = history.remove_item(item_id)
         if not removed:
             raise HTTPException(status_code=404, detail="Elemento no encontrado.")
+        _cancel_pending_delete(item_id)
+        deleted_temp_file = False
+        # Strictly delete ONLY temporary outbox copies (to_phone); NEVER touch Downloads\QuickDrop (to_pc)
+        if (
+            removed.get("kind") == "file"
+            and removed.get("direction") == "to_phone"
+            and removed.get("is_temp_outbox")
+            and removed.get("stored_path")
+        ):
+            deleted_temp_file = await asyncio.to_thread(
+                safe_delete_outbox_file,
+                Path(removed["stored_path"]),
+                settings_manager.outbox_dir(),
+            )
+            _publish_outbox_stats()
         hub.publish("item_removed", {"id": item_id})
-        return {"deleted": True, "id": item_id}
+        return {"deleted": True, "id": item_id, "deleted_temp_file": deleted_temp_file}
 
     @app.get("/api/files/{item_id}")
     async def download_file(
@@ -515,8 +684,8 @@ def create_app(
 
         file_path = Path(item["stored_path"])
         allowed_roots = [
-            settings_manager.settings.resolved_download_dir(),
-            settings_manager.settings.resolved_outbox_dir(),
+            settings_manager.download_dir(),
+            settings_manager.outbox_dir(),
         ]
         if not _validate_path_within(file_path, allowed_roots) or not file_path.is_file():
             raise HTTPException(status_code=404, detail="El archivo ya no existe en disco.")
@@ -535,6 +704,22 @@ def create_app(
                 f"filename*=UTF-8''{encoded_name}"
             ),
         }
+
+        should_schedule_cleanup = (
+            not inline
+            and item.get("direction") == "to_phone"
+            and bool(item.get("is_temp_outbox"))
+        )
+
+        async def _tracked_stream(start_byte: int, end_byte: int, trigger_on_complete: bool) -> AsyncIterator[bytes]:
+            completed = False
+            try:
+                async for chunk in iter_file_chunks(file_path, start=start_byte, end=end_byte):
+                    yield chunk
+                completed = True
+            finally:
+                if completed and trigger_on_complete:
+                    _schedule_outbox_delete_after_download(item_id)
 
         range_header = request.headers.get("range")
         if range_header:
@@ -562,8 +747,9 @@ def create_app(
             content_len = end - start + 1
             headers["Content-Range"] = f"bytes {start}-{end}/{file_size}"
             headers["Content-Length"] = str(content_len)
+            reaches_eof = end == file_size - 1
             return StreamingResponse(
-                iter_file_chunks(file_path, start=start, end=end),
+                _tracked_stream(start, end, should_schedule_cleanup and reaches_eof),
                 status_code=206,
                 media_type=mime_type,
                 headers=headers,
@@ -571,7 +757,7 @@ def create_app(
 
         headers["Content-Length"] = str(file_size)
         return StreamingResponse(
-            iter_file_chunks(file_path, start=0, end=file_size - 1),
+            _tracked_stream(0, file_size - 1, should_schedule_cleanup),
             status_code=200,
             media_type=mime_type,
             headers=headers,
@@ -596,8 +782,8 @@ def create_app(
         if item["kind"] == "file" and item.get("stored_path"):
             file_path = Path(item["stored_path"])
             allowed_roots = [
-                settings_manager.settings.resolved_download_dir(),
-                settings_manager.settings.resolved_outbox_dir(),
+                settings_manager.download_dir(),
+                settings_manager.outbox_dir(),
             ]
             if not _validate_path_within(file_path, allowed_roots) or not file_path.exists():
                 raise HTTPException(status_code=404, detail="Archivo no encontrado en disco.")
@@ -616,8 +802,8 @@ def create_app(
 
         file_path = Path(item["stored_path"])
         allowed_roots = [
-            settings_manager.settings.resolved_download_dir(),
-            settings_manager.settings.resolved_outbox_dir(),
+            settings_manager.download_dir(),
+            settings_manager.outbox_dir(),
         ]
         if not _validate_path_within(file_path, allowed_roots) or not file_path.exists():
             raise HTTPException(status_code=404, detail="Archivo no encontrado en disco.")
@@ -632,7 +818,7 @@ def create_app(
     @app.post("/api/open-downloads")
     async def open_downloads_folder(request: Request) -> JSONResponse:
         _ensure_loopback(request)
-        folder = settings_manager.settings.resolved_download_dir()
+        folder = settings_manager.download_dir()
         if os.name == "nt":
             await asyncio.to_thread(os.startfile, str(folder))
         return JSONResponse({"opened": str(folder)})
